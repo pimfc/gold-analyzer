@@ -498,7 +498,6 @@ def load(symbol, interval, period, key, resample=None):
             if len(df) < 260:
                 notes.append(f"{code}: รวมเป็น {resample} ได้ {len(df)} แท่ง ไม่พอ")
                 continue
-                  
         if df is not None:
             name = f"Yahoo ({code})" if kind == "y" else "Twelve Data (XAU/USD)"
             return df, f"ใช้ข้อมูล {name}" + ("" if code == symbol else " แทนแหล่งที่เลือก"), code
@@ -690,7 +689,6 @@ def live_view():
         if A["status"] == "now" and fresh and tg_token and tg_chat:
             akey = f"{sym}|{tf}|{A['bar']}"
             if st.session_state.get("last_alert") != akey:      # แจ้งครั้งเดียวต่อแท่ง
-
                 st.session_state["last_alert"] = akey
                 msg = (f"สัญญาณ {p['side'].upper()} XAUUSD {tf} ({P['style']})\nกลยุทธ์ {STRATS[p['strat']]} "
                        f"คะแนน {p['score']:.0f}/100\nเข้า ~{p['mid'] + o:.2f}\nSL {p['sl'] + o:.2f}\n"
@@ -725,7 +723,8 @@ def live_view():
         st.caption("ค่าคาดหวัง R/ไม้ > 0 = ในข้อมูลช่วงสั้นที่โหลดมา กลยุทธ์นั้นเฉลี่ยกำไร (1R = เสี่ยงต่อไม้หนึ่งหน่วย) "
                    "จำลองเข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL/TP1 ยังไม่รวมสเปรด/สลิป จำนวนไม้น้อยอาจแกว่งมาก "
                    "ใช้เทียบกลยุทธ์กันเท่านั้น ผลในอดีตไม่รับประกันอนาคต อย่าปรับพารามิเตอร์จนผลย้อนหลังสวยเกินจริง")
-                sg = dd[dd.buy_sig | dd.sell_sig].tail(6).iloc[::-1]
+
+        sg = dd[dd.buy_sig | dd.sell_sig].tail(6).iloc[::-1]
         if len(sg):
             def names(row):
                 ks = [SHORT[k] for k in active if row[f"{k}_buy"] or row[f"{k}_sell"]]
