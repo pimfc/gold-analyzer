@@ -794,7 +794,6 @@ if ...: # หรือบล็อกคำสั่งก่อนหน้า�
     fig.update_xaxes(range=[d.index[0], x_end])
     # uirevision: ซูม/เลื่อนกราฟแล้วไม่ถูกรีเซ็ตทุกครั้งที่รีเฟรช
     fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
-                      legend=dict(orientation="h", y=1.08), uirevision=f"{sym}-{tf}")
         stretch(st.plotly_chart, fig, config=dict(displaylogo=False), key=f"chart-{sym}-{tf}")
     st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
                            else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
