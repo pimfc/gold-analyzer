@@ -730,12 +730,17 @@ def live_view():
             def names(row):
                 ks = [SHORT[k] for k in active if row[f"{k}_buy"] or row[f"{k}_sell"]]
                 return "+".join(ks)
-            stretch(st.dataframe, pd.DataFrame({
-                "เวลา (ไทย)": [i.strftime("%d/%m %H:%M") for i in sg.index],
-                "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
-                "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
-                "คะแนน": [f"{(b if bs else s):.0f}" for b, s, bs in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
-                "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close]}), , key="tbl-sig"
+           stretch(
+    st.dataframe, 
+    pd.DataFrame({
+        "เวลา (ไทย)": [i.strftime("%d/%m %H:%M") for i in sg.index],
+        "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
+        "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
+        "คะแนน": [f"{(b if bs else s):.0f}" for b, s, bs in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
+        "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close]
+    }), 
+    key="tbl-sig"
+)
 
     # กราฟ (ตัด timezone ออกเพื่อให้ Plotly แสดงเวลาไทยตรงๆ)
     d = A["d"].tail(120).copy()
