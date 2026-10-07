@@ -1,9 +1,14 @@
 """
-Gold Analyzer v2 - วิเคราะห์ทอง XAUUSD หลายกลยุทธ์พร้อมกัน (ไม่ต้องใช้ MT5)
-รวมเทคนิค: ย่อตามเทรนด์ (EMA21) / เบรกเอาต์ (Donchian) / MACD กลับตัวตามเทรนด์ / กลับตัวที่ขอบ Bollinger
-กรองด้วย ADX (เทรนด์หรือไซด์เวย์), RSI, แท่งเทียนกลับตัว และเทรนด์ของ Timeframe ใหญ่กว่า
-ให้คะแนนความมั่นใจ 0-100 ทั้งฝั่ง BUY และ SELL รองรับไม้สั้น (M1-M15) และไม้ยาว (H1-H4)
-รันด้วย: streamlit run app.py   (หรือดับเบิลคลิก run.bat)
+Gold Analyzer v3 - วิเคราะห์ทอง XAUUSD แบบรวมเทคนิคเป็นระบบเดียว (ไม่ต้องใช้ MT5)
+หลักคิด: ไม่ปล่อยให้เทคนิคโหวตทับกัน แต่แบ่งเป็น "ชั้น" ที่แต่ละชั้นนับคะแนนครั้งเดียว
+  1) ภาวะตลาด (ADX): มีเทรนด์ / ไซด์เวย์ / กำกวม (กำกวม = ไม่เทรด)
+  2) ทิศทาง: EMA200 + EMA21/50 + เทรนด์ TF ใหญ่ (เป็นตัวบล็อก ไม่ใช่แค่ให้คะแนน)
+  3) โครงสร้างราคา: Swing HH/HL, LH/LL + Fibonacci 38-62%
+  4) แรงส่ง: MACD + RSI + ADX/DI
+  5) จุดเข้า: ย่อ (EMA21+Fib) / เบรกเอาต์ (Donchian) / กลับตัว (Bollinger เฉพาะไซด์เวย์)
+  6) ยืนยัน: แท่งเทียนต้องปิดไปทางเดียวกับทิศที่จะเข้า + ความผันผวนต้องพอ
+เลือกระยะเวลาถือไม้ได้ (สกัลป์ -> สวิงหลายวัน)
+รันด้วย: streamlit run app.py
 """
 import time
 import threading
@@ -27,13 +32,12 @@ STEPS = {"1m": pd.Timedelta(minutes=1), "5m": pd.Timedelta(minutes=5),
          "15m": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4)}
 
 STRATS = {
-    "pullback": "ย่อตามเทรนด์ (EMA21)",
+    "pullback": "ย่อตามเทรนด์ (EMA21 + Fibonacci)",
     "breakout": "เบรกเอาต์ (Donchian 20)",
-    "macd": "MACD กลับตัวตามเทรนด์",
     "reversal": "กลับตัวที่ขอบ Bollinger (ไซด์เวย์)",
 }
-SHORT = {"pullback": "ย่อ", "breakout": "เบรก", "macd": "MACD", "reversal": "กลับตัว"}
-KIND = {"pullback": "trend", "breakout": "trend", "macd": "trend", "reversal": "range"}
+SHORT = {"pullback": "ย่อ", "breakout": "เบรก", "reversal": "กลับตัว"}
+KIND = {"pullback": "trend", "breakout": "trend", "reversal": "range"}
 
 
 def clean(df):
@@ -53,9 +57,7 @@ def resample_ohlc(df, rule):
 
 
 def merge_tick(df, price, tick_time, step, max_gap=3):
-    """รวมราคาทิกสดเข้ากับกราฟ: ถ้ายังอยู่ในแท่งล่าสุดก็อัปเดตแท่งนั้น
-    ถ้าข้ามไปแท่งใหม่แล้ว (Yahoo ยังไม่ส่งแท่งใหม่) ก็สร้างแท่งใหม่ชั่วคราว
-    คืน None ถ้าข้อมูลที่โหลดมาเก่าเกินไปเมื่อเทียบกับทิก (ไม่ควรเอามาต่อกัน)"""
+    """รวมราคาทิกสดเข้ากับกราฟ คืน None ถ้าข้อมูลที่โหลดมาเก่าเกินไปเมื่อเทียบกับทิก"""
     last = df.index[-1]
     n = int((tick_time - last) // step)
     if n > max_gap:
@@ -73,8 +75,7 @@ def merge_tick(df, price, tick_time, step, max_gap=3):
 
 
 def htf_flags(df, rule):
-    """เทรนด์ของ Timeframe ใหญ่กว่า (EMA21/EMA50 บนแท่งใหญ่) แมปกลับมาที่แท่งเล็ก
-    ใช้เฉพาะแท่งใหญ่ที่ 'ปิดแล้ว' เท่านั้น (ไม่แอบดูอนาคต) คืน (up, down, มีข้อมูลพอไหม)"""
+    """เทรนด์ของ Timeframe ใหญ่กว่า (EMA21/EMA50) ใช้เฉพาะแท่งใหญ่ที่ปิดแล้ว (ไม่แอบดูอนาคต)"""
     up = pd.Series(False, index=df.index)
     dn = pd.Series(False, index=df.index)
     if not rule:
@@ -91,28 +92,45 @@ def htf_flags(df, rule):
     return k["u"].fillna(False).astype(bool), k["d"].fillna(False).astype(bool), True
 
 
-def add_ind(df, htf_rule=None, min_score=55, active=tuple(STRATS)):
+def swing_pivots(h, l, k=3):
+    """จุดสวิงที่ 'ยืนยันแล้ว' (ต้องมีแท่งปิดตามหลังอีก k แท่ง) ไม่รีเพนต์
+    คืนอาร์เรย์ของ: สวิงไฮล่าสุด/ก่อนหน้า, สวิงโลว์ล่าสุด/ก่อนหน้า ณ แต่ละแท่ง"""
+    n = len(h)
+    cH, pH, cL, pL = (np.full(n, np.nan) for _ in range(4))
+    ch = ph = cl_ = pl = np.nan
+    for i in range(n):
+        j = i - k
+        if j >= k:
+            if h[j] == h[j - k:j + k + 1].max() and h[j] > h[j - 1]:
+                ph, ch = ch, h[j]
+            if l[j] == l[j - k:j + k + 1].min() and l[j] < l[j - 1]:
+                pl, cl_ = cl_, l[j]
+        cH[i], pH[i], cL[i], pL[i] = ch, ph, cl_, pl
+    return cH, pH, cL, pL
+
+
+def add_ind(df, htf_rule=None, min_score=60):
     c, h, l, o = df["close"], df["high"], df["low"], df["open"]
     df["ema_t"] = c.ewm(span=200, adjust=False).mean()
     df["ema_s"] = c.ewm(span=50, adjust=False).mean()
     df["ema_f"] = c.ewm(span=21, adjust=False).mean()
     d = c.diff()
-    up = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
-    dn = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
-    rsi = 100 - 100 / (1 + up / dn.replace(0, np.nan))
-    # ถ้าไม่มีแรงขายเลย RSI ต้องเป็น 100 (ไม่ใช่ NaN) / ถ้านิ่งสนิทให้เป็น 50
-    df["rsi"] = rsi.where(dn != 0, np.where(up > 0, 100.0, 50.0))
+    gain = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    df["rsi"] = rsi.where(loss != 0, np.where(gain > 0, 100.0, 50.0))
     pc = c.shift(1)
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    # ความผันผวนต้องพอ (ATR ไม่ต่ำกว่า 60% ของค่ากลาง 100 แท่ง) ไม่งั้นสเปรดกินกำไร
+    df["atr_ok"] = df["atr"] >= 0.6 * df["atr"].rolling(100, min_periods=20).median()
 
-    # MACD histogram
     macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-    df["macd_h"] = macd - macd.ewm(span=9, adjust=False).mean()
-    # Bollinger (20, 2)
+    mh = macd - macd.ewm(span=9, adjust=False).mean()
+    df["macd_h"] = mh
     m20, sd = c.rolling(20).mean(), c.rolling(20).std(ddof=0)
     df["bb_m"], df["bb_u"], df["bb_l"] = m20, m20 + 2 * sd, m20 - 2 * sd
-    # ADX / DI
+
     um, dm = h.diff(), -l.diff()
     pdm = pd.Series(np.where((um > dm) & (um > 0), um, 0.0), index=df.index)
     mdm = pd.Series(np.where((dm > um) & (dm > 0), dm, 0.0), index=df.index)
@@ -121,10 +139,9 @@ def add_ind(df, htf_rule=None, min_score=55, active=tuple(STRATS)):
     dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
     df["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean().fillna(0)
     df["pdi"], df["mdi"] = pdi, mdi
-    # Donchian 20 (ไม่รวมแท่งปัจจุบัน)
     dh, dl = h.rolling(20).max().shift(1), l.rolling(20).min().shift(1)
 
-    # แท่งเทียนกลับตัว: Engulfing / Hammer / Shooting star
+    # แท่งเทียนกลับตัว/ยืนยัน: Engulfing / Hammer / Shooting star
     po, pcl = o.shift(1), c.shift(1)
     body, rng = (c - o).abs(), h - l
     lw = pd.concat([o, c], axis=1).min(axis=1) - l
@@ -132,56 +149,85 @@ def add_ind(df, htf_rule=None, min_score=55, active=tuple(STRATS)):
     bull_c = ((pcl < po) & (c > o) & (c >= po) & (o <= pcl)) | ((rng > 0) & (lw >= 2 * body) & (lw >= 0.55 * rng))
     bear_c = ((pcl > po) & (c < o) & (c <= po) & (o >= pcl)) | ((rng > 0) & (uw >= 2 * body) & (uw >= 0.55 * rng))
     df["bull_c"], df["bear_c"] = bull_c, bear_c
+    bull_bar, bear_bar = c > o, c < o
 
-    # เทรนด์ Timeframe ใหญ่
     hu, hd, hok = htf_flags(df, htf_rule)
     df["htf_up"], df["htf_dn"], df["htf_ok"] = hu, hd, hok
 
+    # ทิศทางหลัก
     up_s = (c > df.ema_t) & (df.ema_t > df.ema_t.shift(5))
     dn_s = (c < df.ema_t) & (df.ema_t < df.ema_t.shift(5))
     stk_u, stk_d = df.ema_f > df.ema_s, df.ema_f < df.ema_s
     up_t, dn_t = up_s & stk_u, dn_s & stk_d
     df["up_t"], df["dn_t"] = up_t, dn_t
-    mh = df["macd_h"]
+
+    # โครงสร้างราคา (Swing) + Fibonacci
+    cH, pH, cL, pL = (pd.Series(a, index=df.index) for a in
+                      swing_pivots(h.to_numpy(float), l.to_numpy(float)))
+    st_u, st_d = (cH > pH) & (cL > pL), (cH < pH) & (cL < pL)
+    rsw = (cH - cL).where(cH > cL)
+    fib_b = ((cH - l) / rsw).between(0.30, 0.80)       # ย่อลงมาลึก 30-80% ของขาขึ้นล่าสุด
+    fib_s = ((h - cL) / rsw).between(0.30, 0.80)       # เด้งขึ้นมา 30-80% ของขาลงล่าสุด
+    df["st_u"], df["st_d"], df["fib_b"], df["fib_s"] = st_u, st_d, fib_b, fib_s
+
+    # แรงส่ง
     mac_u, mac_d = (mh > 0) & (mh > mh.shift(1)), (mh < 0) & (mh < mh.shift(1))
+    df["mac_u"], df["mac_d"] = mac_u, mac_d
+    adx = df["adx"]
 
     def I(s):
         return s.astype(int)
 
-    # คะแนนความมั่นใจ 0-100 (กลุ่มตามเทรนด์ / กลุ่มไซด์เวย์)
-    df["sc_tb"] = (20 * I(up_s) + 10 * I(stk_u) + 20 * I(hu) + 15 * I(mac_u) + 10 * I(df.rsi.between(45, 68))
-                   + 10 * I((df.adx >= 20) & (pdi > mdi)) + 15 * I(bull_c))
-    df["sc_ts"] = (20 * I(dn_s) + 10 * I(stk_d) + 20 * I(hd) + 15 * I(mac_d) + 10 * I(df.rsi.between(32, 55))
-                   + 10 * I((df.adx >= 20) & (mdi > pdi)) + 15 * I(bear_c))
-    df["sc_rb"] = 25 * I(df.adx < 20) + 25 * I(df.rsi < 35) + 25 * I(l <= df.bb_l) + 15 * I(bull_c) + 10 * I(~hd)
-    df["sc_rs"] = 25 * I(df.adx < 20) + 25 * I(df.rsi > 65) + 25 * I(h >= df.bb_u) + 15 * I(bear_c) + 10 * I(~hu)
+    # ---- คะแนนฝั่งตามเทรนด์ (รวม 100: ฐาน 90 + จุดเข้าเฉพาะกลยุทธ์ 10) ----
+    base_b = (20 * I(up_s) + 5 * I(stk_u) + 20 * I(hu) + 10 * I(mac_u) + 5 * I(df.rsi.between(45, 68))
+              + 10 * I((adx >= 20) & (pdi > mdi)) + 10 * I(bull_c) + 10 * I(st_u))
+    base_s = (20 * I(dn_s) + 5 * I(stk_d) + 20 * I(hd) + 10 * I(mac_d) + 5 * I(df.rsi.between(32, 55))
+              + 10 * I((adx >= 20) & (mdi > pdi)) + 10 * I(bear_c) + 10 * I(st_d))
+    expand = rng > 1.1 * df.atr.shift(1)
+    sc_pb_b = base_b + 5 * I(fib_b) + 5 * I(l <= df.ema_f)
+    sc_pb_s = base_s + 5 * I(fib_s) + 5 * I(h >= df.ema_f)
+    sc_bo_b = base_b + 5 * I(expand) + 5 * I(c > cH)
+    sc_bo_s = base_s + 5 * I(expand) + 5 * I(c < cL)
+    # ---- คะแนนฝั่งไซด์เวย์ ----
+    sc_rv_b = (25 * I(adx < 18) + 20 * I(df.rsi < 35) + 20 * I(l <= df.bb_l) + 15 * I(bull_c)
+               + 10 * I(l <= cL + 0.5 * df.atr) + 10 * I(~hd))
+    sc_rv_s = (25 * I(adx < 18) + 20 * I(df.rsi > 65) + 20 * I(h >= df.bb_u) + 15 * I(bear_c)
+               + 10 * I(h >= cH - 0.5 * df.atr) + 10 * I(~hu))
 
-    trig = {
-        "pullback": (up_t & (l <= df.ema_f) & (c > df.ema_f) & df.rsi.between(45, 68),
-                     dn_t & (h >= df.ema_f) & (c < df.ema_f) & df.rsi.between(32, 55)),
-        "breakout": ((c > dh) & (df.adx >= 18) & (c > df.ema_t) & ((c - o) > 0.4 * df.atr),
-                     (c < dl) & (df.adx >= 18) & (c < df.ema_t) & ((o - c) > 0.4 * df.atr)),
-        "macd": ((mh > 0) & (mh.shift(1) <= 0) & up_s, (mh < 0) & (mh.shift(1) >= 0) & dn_s),
-        "reversal": ((l <= df.bb_l) & (c > df.bb_l) & (df.rsi < 40) & (df.adx < 25),
-                     (h >= df.bb_u) & (c < df.bb_u) & (df.rsi > 60) & (df.adx < 25)),
+    # ---- จุดเข้า: แยกตามภาวะตลาด (ADX>=20 เทรนด์ / ADX<18 ไซด์เวย์ / 18-20 ไม่เทรด) จึงไม่ทับกัน ----
+    trg = {
+        "pullback": (up_t & (adx >= 20) & (l <= df.ema_f) & (c > df.ema_f) & (c > df.ema_s) & bull_bar
+                     & df.rsi.between(40, 68),
+                     dn_t & (adx >= 20) & (h >= df.ema_f) & (c < df.ema_f) & (c < df.ema_s) & bear_bar
+                     & df.rsi.between(32, 60)),
+        "breakout": (up_t & (c > dh) & (adx >= 20) & bull_bar & ((c - o) > 0.5 * df.atr)
+                     & ((c - df.ema_f) < 2.5 * df.atr) & (df.rsi < 75),
+                     dn_t & (c < dl) & (adx >= 20) & bear_bar & ((o - c) > 0.5 * df.atr)
+                     & ((df.ema_f - c) < 2.5 * df.atr) & (df.rsi > 25)),
+        "reversal": ((adx < 18) & (l <= df.bb_l) & (c > df.bb_l) & (df.rsi < 40) & bull_bar,
+                     (adx < 18) & (h >= df.bb_u) & (c < df.bb_u) & (df.rsi > 60) & bear_bar),
     }
-    bsum = np.zeros(len(df))
-    ssum = np.zeros(len(df))
-    anyb = np.zeros(len(df), bool)
-    anys = np.zeros(len(df), bool)
-    for k, (tb, ts) in trig.items():
-        sb_, ss_ = ("sc_tb", "sc_ts") if KIND[k] == "trend" else ("sc_rb", "sc_rs")
-        buy = np.array(tb & (df[sb_] >= min_score), dtype=bool)
-        sell = np.array(ts & (df[ss_] >= min_score), dtype=bool)
+    scr = {"pullback": (sc_pb_b, sc_pb_s), "breakout": (sc_bo_b, sc_bo_s), "reversal": (sc_rv_b, sc_rv_s)}
+
+    gate_b = df["atr_ok"] & ~hd         # ห้ามสวน TF ใหญ่ + ตลาดต้องไม่นิ่งเกิน
+    gate_s = df["atr_ok"] & ~hu
+    n = len(df)
+    anyb, anys = np.zeros(n, bool), np.zeros(n, bool)
+    bsc, ssc = np.zeros(n), np.zeros(n)
+    for k in STRATS:
+        tb, ts = trg[k]
+        sb_, ss_ = scr[k]
+        df[f"sc_{k}_b"], df[f"sc_{k}_s"] = sb_, ss_
+        buy = np.array(tb & gate_b & (sb_ >= min_score), dtype=bool)
+        sell = np.array(ts & gate_s & (ss_ >= min_score), dtype=bool)
         buy[-1] = sell[-1] = False                       # แท่งสุดท้ายยังไม่ปิด ไม่นับ
         df[f"{k}_buy"], df[f"{k}_sell"] = buy, sell
-        if k in active:
-            anyb |= buy
-            anys |= sell
-            bsum = np.maximum(bsum, np.where(buy, df[sb_].to_numpy(float), 0))
-            ssum = np.maximum(ssum, np.where(sell, df[ss_].to_numpy(float), 0))
+        anyb |= buy
+        anys |= sell
+        bsc = np.maximum(bsc, np.where(buy, sb_.to_numpy(float), 0))
+        ssc = np.maximum(ssc, np.where(sell, ss_.to_numpy(float), 0))
     df["buy_sig"], df["sell_sig"] = anyb, anys
-    df["buy_sc"], df["sell_sc"] = bsum, ssum
+    df["buy_sc"], df["sell_sc"] = bsc, ssc
     return df
 
 
@@ -197,14 +243,25 @@ def swing_levels(df, k=5, look=300):
     return sup, res
 
 
+def day_levels(df):
+    """สูง/ต่ำของวันก่อนหน้า (แนวสำคัญที่คนใช้กันเยอะ)"""
+    try:
+        dd = resample_ohlc(df, "1D")
+        if len(dd) >= 2:
+            return float(dd["high"].iloc[-2]), float(dd["low"].iloc[-2])
+    except Exception:
+        pass
+    return None, None
+
+
 def mults(prof, k):
-    """ตัวคูณ ATR (SL, TP1) ของแต่ละกลยุทธ์: กลับตัวใช้เป้าสั้นกว่า เบรกเอาต์ใช้เป้ายาวกว่า"""
+    """ตัวคูณ ATR (SL, TP1): กลับตัวใช้เป้าสั้นกว่า เบรกเอาต์ใช้เป้ายาวกว่า"""
     sl, tp = prof["sl"], prof["tp"]
-    return {"pullback": (sl, tp), "breakout": (sl, tp * 1.2), "macd": (sl, tp), "reversal": (sl * 0.8, tp * 0.6)}[k]
+    return {"pullback": (sl, tp), "breakout": (sl, tp * 1.2), "reversal": (sl * 0.8, tp * 0.6)}[k]
 
 
-def analyse(df, prof, off=0.0, min_score=55, active=tuple(STRATS)):
-    d = add_ind(df.copy(), prof.get("htf"), min_score, active)
+def analyse(df, prof, min_score=60):
+    d = add_ind(df.tail(2500).copy(), prof.get("htf"), min_score)
     b1 = d.iloc[-2]                                # แท่งที่ปิดแล้วล่าสุด
     price = float(d.iloc[-1]["close"])
     atr = float(b1["atr"])
@@ -212,38 +269,86 @@ def analyse(df, prof, off=0.0, min_score=55, active=tuple(STRATS)):
         raise ValueError("ค่า ATR ใช้ไม่ได้ (ข้อมูลนิ่งหรือไม่พอ)")
     up, dn = bool(b1.up_t), bool(b1.dn_t)
     bias = "up" if up else "down" if dn else "side"
-    trending = bool(b1.adx >= 20)
+    adx = float(b1.adx)
+    regime = "trend" if adx >= 20 else "range" if adx < 18 else "mixed"
+    atr_ok = bool(b1.atr_ok)
+    htf_ok = bool(b1.htf_ok)
 
-    # สัญญาณที่เกิดขึ้นที่แท่งปิดล่าสุด เรียงตามคะแนน
     fired = []
-    for k in active:
-        sb_, ss_ = ("sc_tb", "sc_ts") if KIND[k] == "trend" else ("sc_rb", "sc_rs")
+    for k in STRATS:
         if bool(d[f"{k}_buy"].iloc[-2]):
-            fired.append((k, "buy", float(b1[sb_])))
+            fired.append((k, "buy", float(b1[f"sc_{k}_b"])))
         if bool(d[f"{k}_sell"].iloc[-2]):
-            fired.append((k, "sell", float(b1[ss_])))
+            fired.append((k, "sell", float(b1[f"sc_{k}_s"])))
     fired.sort(key=lambda x: -x[2])
 
     sup, res = swing_levels(d)
+    pdh, pdl = day_levels(df)
+    if pdh is not None:
+        res.append(pdh)
+        sup.append(pdl)
     near_res = min([x for x in res if x > price], default=None)
     near_sup = max([x for x in sup if x < price], default=None)
 
-    side, strat, score, status = None, None, 0.0, "no"
+    side, strat, score, status, msg = None, None, 0.0, "no", ""
     lo = hi = price
     if fired:
         strat, side, score = fired[0]
-        status = "now"
-    elif "pullback" in active and bias != "side":
-        side, strat, status = ("buy" if up else "sell"), "pullback", "wait"
-        score = float(b1["sc_tb"] if up else b1["sc_ts"])
-        lo, hi = ((b1.ema_f - 0.3 * atr, b1.ema_f + 0.1 * atr) if up
-                  else (b1.ema_f - 0.1 * atr, b1.ema_f + 0.3 * atr))
-    elif "reversal" in active and not trending and np.isfinite(b1.bb_l):
+        ref = float(b1.close)
+        if side == "buy":
+            lo, hi = ref - 0.35 * atr, ref + 0.15 * atr
+            if price < float(b1.low) - 0.1 * atr:
+                status, msg = "dead", "ราคาหลุดต่ำกว่าแท่งสัญญาณแล้ว สัญญาณ BUY ถูกยกเลิก อย่าเข้า"
+            elif price > hi + 0.4 * atr:
+                status, msg = "late", "ราคาวิ่งหนีจากจุดเข้าไปแล้ว อย่าไล่ รอสัญญาณใหม่"
+            else:
+                status = "now"
+        else:
+            lo, hi = ref - 0.15 * atr, ref + 0.35 * atr
+            if price > float(b1.high) + 0.1 * atr:
+                status, msg = "dead", "ราคาทะลุเหนือแท่งสัญญาณแล้ว สัญญาณ SELL ถูกยกเลิก อย่าเข้า"
+            elif price < lo - 0.4 * atr:
+                status, msg = "late", "ราคาวิ่งหนีจากจุดเข้าไปแล้ว อย่าไล่ รอสัญญาณใหม่"
+            else:
+                status = "now"
+        if status != "now":
+            side = None
+    elif not atr_ok:
+        msg = "ตลาดนิ่งเกินไป (ATR ต่ำ) สเปรดจะกินกำไร"
+    elif regime == "mixed":
+        msg = f"ADX {adx:.0f} อยู่ช่วงกำกวม (18-20) ยังบอกไม่ได้ว่าเป็นเทรนด์หรือไซด์เวย์ ไม่เทรด"
+    elif regime == "trend":
+        if not (up or dn):
+            msg = "ADX บอกว่ามีเทรนด์ แต่ EMA ยังไม่เรียงทิศชัดเจน รอก่อน"
+        elif (up and htf_ok and b1.htf_dn) or (dn and htf_ok and b1.htf_up):
+            msg = f"ทิศทางสวนเทรนด์ TF ใหญ่ ({prof.get('htf')}) ไม่เข้าไม้"
+        else:
+            ema_f, ema_s = float(b1.ema_f), float(b1.ema_s)
+            zl, zh = (ema_f - 0.3 * atr, ema_f + 0.1 * atr) if up else (ema_f - 0.1 * atr, ema_f + 0.3 * atr)
+            if up and price < ema_s:
+                msg = "ราคาหลุด EMA50 เทรนด์ขึ้นเริ่มเสีย ห้ามรับ BUY"
+            elif dn and price > ema_s:
+                msg = "ราคาทะลุ EMA50 เทรนด์ลงเริ่มเสีย ห้ามเข้า SELL"
+            elif abs(price - ema_f) > 2.5 * atr and ((up and price > zh) or (dn and price < zl)):
+                msg = "ราคาอยู่ไกลจากจุดย่อ/เด้งมาก อย่าไล่ รอให้ย้อนกลับมาที่ EMA21"
+            elif (up and price < zl) or (dn and price > zh):
+                msg = "ราคาทะลุผ่านโซนย่อ/เด้งไปแล้ว รอดูว่าจะยืนกลับมาได้ไหม"
+            else:
+                side, strat, status = ("buy" if up else "sell"), "pullback", "wait"
+                score = float(b1["sc_pullback_b"] if up else b1["sc_pullback_s"])
+                lo, hi = zl, zh
+    elif regime == "range" and np.isfinite(b1.bb_l):
         near_low = abs(price - b1.bb_l) <= abs(b1.bb_u - price)
-        side, strat, status = ("buy" if near_low else "sell"), "reversal", "wait"
-        score = float(b1["sc_rb"] if near_low else b1["sc_rs"])
-        lo, hi = ((b1.bb_l - 0.1 * atr, b1.bb_l + 0.3 * atr) if near_low
-                  else (b1.bb_u - 0.3 * atr, b1.bb_u + 0.1 * atr))
+        band = float(b1.bb_l if near_low else b1.bb_u)
+        if abs(price - band) <= 1.0 * atr and not (near_low and htf_ok and b1.htf_dn) \
+                and not ((not near_low) and htf_ok and b1.htf_up):
+            side, strat, status = ("buy" if near_low else "sell"), "reversal", "wait"
+            score = float(b1["sc_reversal_b"] if near_low else b1["sc_reversal_s"])
+            lo, hi = ((band - 0.1 * atr, band + 0.3 * atr) if near_low else (band - 0.3 * atr, band + 0.1 * atr))
+        else:
+            msg = "ตลาดไซด์เวย์ แต่ราคายังอยู่กลางกรอบ (หรือสวน TF ใหญ่) ยังไม่ใกล้ขอบ Bollinger"
+    if not msg and status == "no":
+        msg = "ยังไม่เข้าเงื่อนไขของกลยุทธ์ใดเลย"
 
     plan, warns = None, []
     if side:
@@ -256,18 +361,14 @@ def analyse(df, prof, off=0.0, min_score=55, active=tuple(STRATS)):
         plan = dict(side=side, lo=lo, hi=hi, mid=mid, sl=sl, tp1=tp1, tp2=tp2, sl_dist=abs(mid - sl),
                     rr=tp_m / sl_m, strat=strat, score=score)
         if side == "buy" and near_res and near_res < tp1:
-            warns.append(f"มีแนวต้านที่ {near_res + off:.2f} ก่อนถึง TP1 ราคาอาจชนแนวนี้ก่อน")
+            warns.append(f"มีแนวต้านที่ {near_res:.2f} ก่อนถึง TP1 ราคาอาจชนแนวนี้ก่อน (พิจารณาออกบางส่วน)")
         if side == "sell" and near_sup and near_sup > tp1:
-            warns.append(f"มีแนวรับที่ {near_sup + off:.2f} ก่อนถึง TP1 ราคาอาจชนแนวนี้ก่อน")
+            warns.append(f"มีแนวรับที่ {near_sup:.2f} ก่อนถึง TP1 ราคาอาจชนแนวนี้ก่อน (พิจารณาออกบางส่วน)")
         if side == "buy" and b1.rsi > 70:
             warns.append("RSI สูง ระวังไล่ราคา")
         if side == "sell" and b1.rsi < 30:
             warns.append("RSI ต่ำ ระวังไล่ราคา")
-        if strat == "pullback" and status == "wait" and abs(price - b1.ema_f) > 2.5 * atr:
-            warns.append("ราคาอยู่ห่างจากจุดย่อมาก อย่าไล่เข้า รอให้ย้อนกลับมาที่โซน")
-        if bool(b1.htf_ok) and ((side == "buy" and b1.htf_dn) or (side == "sell" and b1.htf_up)):
-            warns.append(f"สวนเทรนด์ของ TF ใหญ่ ({prof.get('htf')}) ความเสี่ยงสูงกว่าปกติ ลด lot หรือรอเทรนด์ตรงกัน")
-        if prof.get("style", "").startswith("ไม้สั้น") and 3 <= d.index[-1].hour < 14:
+        if prof.get("scalp") and 3 <= d.index[-1].hour < 14:
             warns.append("ช่วงเวลาเอเชีย (ไทย 03:00-14:00) ทองผันผวนต่ำ ไม้สั้นสเปรดกินกำไรง่าย")
 
     cs = side or ("buy" if up else "sell" if dn else None)
@@ -276,107 +377,108 @@ def analyse(df, prof, off=0.0, min_score=55, active=tuple(STRATS)):
         return bool(a) if cs == "buy" else bool(b) if cs == "sell" else False
 
     checks = {
-        "เทรนด์ EMA200 ชัดเจน (ราคาเทียบ EMA200 และเส้นชี้ทิศ)": up or dn,
+        "เทรนด์หลัก EMA200 ชัดเจน (ราคาเทียบ EMA200 และเส้นชี้ทิศ)": up or dn,
         "EMA21 / EMA50 เรียงตามทิศทาง": pick(b1.ema_f > b1.ema_s, b1.ema_f < b1.ema_s),
-        "ราคาย่อ/เด้งแตะ EMA21 แล้วปิดกลับตามเทรนด์": bool(fired) and fired[0][0] == "pullback" or pick(
-            b1.low <= b1.ema_f and b1.close > b1.ema_f, b1.high >= b1.ema_f and b1.close < b1.ema_f),
+        (f"TF ใหญ่ ({prof.get('htf')}) เห็นด้วย" if htf_ok else "TF ใหญ่: ข้อมูลไม่พอ"): pick(b1.htf_up, b1.htf_dn),
+        "โครงสร้างราคา (HH/HL สำหรับขึ้น, LH/LL สำหรับลง)": pick(b1.st_u, b1.st_d),
+        "MACD ไปทางเดียวกันและแรงขึ้นต่อ": pick(b1.mac_u, b1.mac_d),
         f"RSI อยู่ในช่วงเหมาะสม (ตอนนี้ {b1.rsi:.0f})": pick(45 <= b1.rsi <= 68, 32 <= b1.rsi <= 55),
-        "MACD ไปทางเดียวกัน": pick(b1.macd_h > 0, b1.macd_h < 0),
-        f"ADX {b1.adx:.0f} (ตั้งแต่ 20 = มีเทรนด์)": trending,
-        (f"TF ใหญ่ ({prof.get('htf')}) เห็นด้วย" if b1.htf_ok else "TF ใหญ่: ข้อมูลไม่พอ"): pick(b1.htf_up, b1.htf_dn),
-        "แท่งเทียนกลับตัว/ยืนยัน (Engulfing, Hammer, Shooting star)": pick(b1.bull_c, b1.bear_c),
+        f"ADX {adx:.0f} (ตั้งแต่ 20 = มีเทรนด์)": regime == "trend",
+        "แท่งเทียนยืนยันทิศทาง (Engulfing, Hammer, Shooting star)": pick(b1.bull_c, b1.bear_c),
+        "ราคาอยู่ในโซน Fibonacci 38-62% ของขาล่าสุด": pick(b1.fib_b, b1.fib_s),
+        "ความผันผวนพอ (ATR ไม่นิ่งเกินไป)": atr_ok,
     }
     checks = {k: bool(v) for k, v in checks.items()}
-    return dict(d=d, bias=bias, status=status, plan=plan, price=price, atr=atr, checks=checks,
+    return dict(d=d, bias=bias, status=status, msg=msg, plan=plan, price=price, atr=atr, checks=checks,
                 sup=near_sup, res=near_res, warns=warns, bar=d.index[-2], fired=fired,
-                regime="trend" if trending else "range", htf_ok=bool(b1.htf_ok))
+                regime=regime, htf_ok=htf_ok)
 
 
 def _sim(d, events, max_bars):
-    """จำลองรายไม้: เข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL/TP1 (ชนทั้งคู่ในแท่งเดียว = แพ้, ไม่เปิดไม้ซ้อน)"""
+    """จำลองรายไม้: เข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL / TP1 / หมดเวลาถือ (ปิดที่ราคาตลาด)
+    ชนทั้ง SL และ TP ในแท่งเดียว = แพ้ ไม่เปิดไม้ซ้อน"""
     hi, lo, cl, atr = (d[c].to_numpy(float) for c in ("high", "low", "close", "atr"))
-    n, wins, losses, r_sum, free_from = len(d), 0, 0, 0.0, 0
+    n, wins, losses, r_sum, free_from, timeouts = len(d), 0, 0, 0.0, 0, 0
     for i, s, sl_m, tp_m in events:
         if i < free_from or not np.isfinite(atr[i]) or atr[i] <= 0:
             continue
         sl, tp = cl[i] - s * sl_m * atr[i], cl[i] + s * tp_m * atr[i]
-        for j in range(i + 1, min(n, i + 1 + max_bars)):
+        end = min(n - 1, i + max_bars)
+        out = None
+        for j in range(i + 1, end + 1):
             hit_sl = lo[j] <= sl if s == 1 else hi[j] >= sl
             hit_tp = hi[j] >= tp if s == 1 else lo[j] <= tp
             if hit_sl or hit_tp:
-                if hit_sl:
-                    losses += 1
-                    r_sum -= 1.0
-                else:
-                    wins += 1
-                    r_sum += tp_m / sl_m
-                free_from = j + 1
+                out = (j, -1.0 if hit_sl else tp_m / sl_m)
                 break
+        if out is None:
+            if i + max_bars > n - 1:
+                continue                                   # ไม้ยังไม่ครบเวลาถือ ไม่นับ
+            out = (end, s * (cl[end] - cl[i]) / (sl_m * atr[i]))
+            timeouts += 1
+        j, r = out
+        if r > 0:
+            wins += 1
+        else:
+            losses += 1
+        r_sum += r
+        free_from = j + 1
     total = wins + losses
     return dict(n=total, wins=wins, losses=losses, winrate=(100 * wins / total) if total else 0.0,
-                exp_r=(r_sum / total) if total else 0.0)
+                exp_r=(r_sum / total) if total else 0.0, timeouts=timeouts)
 
 
-def backtest(d, prof, active=tuple(STRATS), max_bars=60):
-    """ผลย้อนหลังคร่าวๆ แยกรายกลยุทธ์ + รวมทุกกลยุทธ์ที่เลือก (คีย์ 'all')
-    ยังไม่รวมสเปรด/สลิป และข้อมูลช่วงสั้น จึงใช้เทียบกลยุทธ์กันเท่านั้น ไม่ใช่คำสัญญา"""
-    n = len(d)
-    cols = {k: (d[f"{k}_buy"].to_numpy(bool), d[f"{k}_sell"].to_numpy(bool)) for k in STRATS}
+def backtest(d, prof):
+    """ผลย้อนหลังคร่าวๆ แยกรายกลยุทธ์ + รวม (คีย์ 'all') ยังไม่รวมสเปรด/สลิป ใช้เทียบกันเท่านั้น"""
+    n, max_bars = len(d), prof["max_bars"]
+    sig = {k: (d[f"{k}_buy"].to_numpy(bool), d[f"{k}_sell"].to_numpy(bool)) for k in STRATS}
     out = {}
     for k in STRATS:
-        b, s_ = cols[k]
+        b, s_ = sig[k]
         sl_m, tp_m = mults(prof, k)
         out[k] = _sim(d, [(i, 1 if b[i] else -1, sl_m, tp_m) for i in np.flatnonzero(b | s_)], max_bars)
-    scb, scs = {}, {}
-    for k in STRATS:
-        scb[k] = d["sc_tb" if KIND[k] == "trend" else "sc_rb"].to_numpy(float)
-        scs[k] = d["sc_ts" if KIND[k] == "trend" else "sc_rs"].to_numpy(float)
     anyf = np.zeros(n, bool)
-    for k in active:
-        anyf |= cols[k][0] | cols[k][1]
+    for k in STRATS:
+        anyf |= sig[k][0] | sig[k][1]
+    scb = {k: d[f"sc_{k}_b"].to_numpy(float) for k in STRATS}
+    scs = {k: d[f"sc_{k}_s"].to_numpy(float) for k in STRATS}
     ev = []
     for i in np.flatnonzero(anyf):
         best = None
-        for k in active:
-            if cols[k][0][i] and (best is None or scb[k][i] > best[0]):
+        for k in STRATS:
+            if sig[k][0][i] and (best is None or scb[k][i] > best[0]):
                 best = (scb[k][i], 1, k)
-            if cols[k][1][i] and (best is None or scs[k][i] > best[0]):
+            if sig[k][1][i] and (best is None or scs[k][i] > best[0]):
                 best = (scs[k][i], -1, k)
         sl_m, tp_m = mults(prof, best[2])
         ev.append((i, best[1], sl_m, tp_m))
     out["all"] = _sim(d, ev, max_bars)
     return out
-
-
-def lot_for(sl_dist, balance, risk_pct, contract, min_lot):
-    risk_money = balance * risk_pct / 100
-    per_lot = sl_dist * contract
-    if per_lot <= 0 or min_lot <= 0:
-        return 0.0, "คำนวณ lot ไม่ได้"
-    lot = np.floor(round(risk_money / per_lot / min_lot, 6)) * min_lot    # round กันเศษทศนิยมลอยตัว
-    if lot < min_lot:
-        actual = min_lot * per_lot
-        if actual > risk_money * 2:
-            return 0.0, f"lot ขั้นต่ำเสี่ยง ${actual:.2f} เกินกรอบ ${risk_money:.2f} มาก ไม่ควรเข้าไม้นี้ (ลองบัญชี Cent/Micro หรือเพิ่มทุน)"
-        return min_lot, f"ใช้ lot ขั้นต่ำ เสี่ยง ${actual:.2f}"
-    return round(float(lot), 2), f"เสี่ยงประมาณ ${lot * per_lot:.2f}"
 # ===================================================================================
 # <<< CORE END
 # ===================================================================================
 
-# ค่าตามแต่ละ Timeframe: interval/period ของ Yahoo, ตัวคูณ ATR สำหรับ SL/TP, TF ใหญ่ที่ใช้ยืนยันเทรนด์
-# resample = รวมแท่งจาก interval เป็นแท่งใหญ่ (H4 ดึง 1h มารวมเอง เพราะ Yahoo ไม่มี 4h)
+# ระยะเวลาถือไม้ -> กราฟที่ใช้วิเคราะห์ / TF ใหญ่ที่ใช้ยืนยันเทรนด์ / ตัวคูณ ATR สำหรับ SL, TP
+# max_bars = เวลาถือสูงสุดเป็นจำนวนแท่ง (ใช้ตอนจำลองย้อนหลัง: ครบเวลาแล้วปิดไม้ที่ราคาตลาด)
 PROFILES = {
-    "M1":  dict(interval="1m",  period="5d",   sl=1.5, tp=2.25, style="ไม้สั้น (สกัลป์)",   htf="15min", max_bars=60),
-    "M5":  dict(interval="5m",  period="30d",  sl=1.5, tp=2.5,  style="ไม้สั้น",            htf="1h",    max_bars=60),
-    "M15": dict(interval="15m", period="30d",  sl=1.5, tp=3.0,  style="ไม้สั้น-กลาง",       htf="1h",    max_bars=60),
-    "H1":  dict(interval="1h",  period="180d", sl=1.5, tp=3.0,  style="ไม้ยาว (สวิง)",      htf="4h",    max_bars=80),
-    "H4":  dict(interval="1h",  period="365d", resample="4h", sl=1.8, tp=4.0,
-                style="ไม้ยาว (สวิงหลายวัน)", htf="1D", max_bars=100),
+    "สกัลป์ · ถือ 5-30 นาที": dict(
+        tf="M1", interval="1m", period="5d", sl=1.2, tp=1.8, htf="15min", max_bars=30, scalp=True,
+        hold="ถือราว 5-30 นาที"),
+    "ไม้สั้น · ถือ 30 นาที-3 ชม.": dict(
+        tf="M5", interval="5m", period="30d", sl=1.5, tp=2.5, htf="1h", max_bars=36, scalp=True,
+        hold="ถือราว 30 นาที-3 ชั่วโมง"),
+    "ไม้กลาง · ถือ 3-12 ชม. (ในวัน)": dict(
+        tf="M15", interval="15m", period="59d", sl=1.5, tp=3.0, htf="4h", max_bars=48, scalp=False,
+        hold="ถือราว 3-12 ชั่วโมง (จบในวัน)"),
+    "ไม้ยาว · ถือ 1-3 วัน": dict(
+        tf="H1", interval="1h", period="180d", sl=1.5, tp=3.0, htf="4h", max_bars=72, scalp=False,
+        hold="ถือราว 1-3 วัน"),
+    "สวิง · ถือหลายวัน-สัปดาห์": dict(
+        tf="H4", interval="1h", period="365d", resample="4h", sl=1.8, tp=4.0, htf="1D", max_bars=60, scalp=False,
+        hold="ถือหลายวันถึงประมาณ 1-2 สัปดาห์"),
 }
 SYMBOLS = {"XAUUSD=X (ทองสปอต)": "XAUUSD=X", "GC=F (ทองฟิวเจอร์ส COMEX)": "GC=F"}
 SPOT = "XAUUSD=X"
-TD_INTERVAL = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
 
 
 def _secret(key, default=""):
@@ -389,39 +491,22 @@ def _secret(key, default=""):
 # ---------------- Sidebar ----------------
 sb = st.sidebar
 sb.header("ตั้งค่า")
-sym_label = sb.selectbox("แหล่งราคา", list(SYMBOLS))
-tf = sb.selectbox("Timeframe", list(PROFILES), index=1, format_func=lambda k: f"{k} · {PROFILES[k]['style']}",
-                  help="M1-M15 = ไม้สั้น เป้าใกล้ ถือไม่นาน / H1-H4 = ไม้ยาว เป้าไกล ถือหลายชั่วโมงถึงหลายวัน "
-                       "(ไม้ยาว SL กว้างกว่า ต้องใช้ lot เล็กลงเพื่อคุมความเสี่ยงเท่าเดิม)")
-offset = sb.number_input("ส่วนต่างราคาโบรกเกอร์ (โบรกเกอร์ - Yahoo)", value=0.0, step=0.1,
-                         help="เทียบราคาในแอปกับ MT5 แล้วใส่ผลต่างตรงนี้ เพื่อให้จุดเข้าตรงกับกราฟที่คุณเทรดจริง")
-sb.subheader("กลยุทธ์ที่ใช้วิเคราะห์")
-active = tuple(sb.multiselect("เลือกกลยุทธ์ (ใช้ร่วมกันได้)", list(STRATS), default=list(STRATS),
-                              format_func=lambda k: STRATS[k]))
-if not active:
-    sb.warning("ยังไม่ได้เลือกกลยุทธ์ ใช้ทุกกลยุทธ์ให้ก่อน")
-    active = tuple(STRATS)
-min_score = sb.slider("ความเข้มงวด (คะแนนขั้นต่ำ 0-100)", 30, 90, 55, 5,
-                      help="สัญญาณต้องผ่านคะแนนยืนยัน (เทรนด์ TF ใหญ่, MACD, ADX, RSI, แท่งเทียน) เท่านี้ขึ้นไปถึงจะแสดง "
-                           "ยิ่งสูงยิ่งสัญญาณน้อยแต่คัดมาแล้ว ดูผลย้อนหลังในกล่อง 'เปรียบเทียบกลยุทธ์' ประกอบการปรับ")
-sb.subheader("จัดการความเสี่ยง")
-balance = sb.number_input("ยอดเงิน (USD)", value=100.0, min_value=1.0, step=10.0)
-risk_pct = sb.number_input("เสี่ยงต่อไม้ (%)", value=1.0, min_value=0.1, max_value=5.0, step=0.1)
-contract = sb.number_input("Contract size (ออนซ์/lot)", value=100.0, min_value=1.0, step=1.0)
-min_lot = sb.number_input("lot ขั้นต่ำ", value=0.01, min_value=0.01, step=0.01, format="%.2f")
+sym_label = sb.selectbox("แหล่งราคา", list(SYMBOLS),
+                         help="MT5 ส่วนใหญ่เทรดทองสปอต เลือก XAUUSD=X จะใกล้เคียงที่สุด")
+hold_key = sb.selectbox("ระยะเวลาถือไม้", list(PROFILES), index=1,
+                        help="เลือกให้ตรงกับสไตล์การเทรดของคุณ ระบบจะปรับ Timeframe, เป้า TP/SL และ TF ใหญ่ที่ใช้ยืนยันเทรนด์ให้เอง "
+                             "ไม้สั้น = เป้าใกล้ SL แคบ / ไม้ยาว = เป้าไกล SL กว้าง")
+P = dict(PROFILES[hold_key], step=STEPS[PROFILES[hold_key].get("resample", PROFILES[hold_key]["interval"])])
+tf = P["tf"]
+sb.caption(f"วิเคราะห์จากกราฟ {tf} | ยืนยันเทรนด์ด้วย {P['htf']} | {P['hold']}")
+min_score = sb.slider("ความเข้มงวด (คะแนนขั้นต่ำ 0-100)", 40, 90, 60, 5,
+                      help="สัญญาณต้องผ่านคะแนนรวมของทุกชั้นวิเคราะห์ (เทรนด์, TF ใหญ่, โครงสร้าง, แรงส่ง, ADX, แท่งเทียน) "
+                           "เท่านี้ขึ้นไปถึงจะแสดง ยิ่งสูงยิ่งสัญญาณน้อยแต่คัดมาแล้ว")
 sb.subheader("แจ้งเตือน Telegram (ไม่บังคับ)")
 tg_token = sb.text_input("Bot token", value=_secret("TG_TOKEN"), type="password")
 tg_chat = sb.text_input("Chat ID", value=str(_secret("TG_CHAT")))
-sb.subheader("แหล่งราคาสำรอง (ไม่บังคับ)")
-td_key = sb.text_input("Twelve Data API key", value=_secret("TWELVE_KEY"), type="password",
-                       help="สมัครฟรีที่ twelvedata.com ใช้เมื่อ Yahoo ไม่ส่งข้อมูล (เซิร์ฟเวอร์คลาวด์มักถูก Yahoo จำกัด) "
-                            "โควตาฟรีจำกัด แอปจึงดึงจากแหล่งนี้ไม่เกินทุก ~2 นาที")
-
-speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60], index=3,
-                     help="เร็วสุดที่ Streamlit วาดกราฟทั้งใบใหม่ได้จริงคือราว 0.1 วินาที (0.01 วินาที = 100 ครั้ง/วินาที ทำไม่ได้ "
-                          "และ Yahoo ส่งทิกมาราว 1 ครั้ง/วินาที จึงไม่มีราคาใหม่ให้วาดถี่ขนาดนั้น) "
-                          "ถ้าเครื่องหรือเน็ตช้าให้เลือก 0.5-1 วินาที ข้อมูลแท่งเทียนย้อนหลังดึงใหม่ทุก ~5 วินาที")
-P = dict(PROFILES[tf], step=STEPS[PROFILES[tf].get("resample", PROFILES[tf]["interval"])])
+speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.5, 1, 2, 5, 10, 30, 60], index=1,
+                     help="Yahoo ส่งทิกราว 1 ครั้ง/วินาที เลือก 1-2 วินาทีก็พอ ถ้าเครื่องหรือเน็ตช้าให้เลือกมากกว่านี้")
 
 
 # ---------------- Telegram ----------------
@@ -461,46 +546,19 @@ def load_yahoo(sym, interval, period):
         return None, f"Yahoo {sym}: {type(e).__name__}"
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_td(interval, key):
-    """Twelve Data (สปอต XAU/USD) แคช 2 นาที เพื่อไม่ให้โควตาฟรีหมด"""
-    try:
-        r = requests.get("https://api.twelvedata.com/time_series", timeout=15, params=dict(
-            symbol="XAU/USD", interval=TD_INTERVAL[interval], outputsize=600, timezone="UTC", apikey=key)).json()
-        if "values" not in r:
-            return None, f"Twelve Data: {r.get('message', 'ไม่มีข้อมูล')}"
-        df = pd.DataFrame(r["values"])
-        df.index = pd.to_datetime(df.pop("datetime"))
-        df = clean(df)
-        if len(df) >= 260:
-            return df, ""
-        return None, f"Twelve Data: ได้ {len(df)} แท่ง"
-    except Exception as e:
-        return None, f"Twelve Data: {type(e).__name__}"
-
-
-def load(symbol, interval, period, key, resample=None):
-    """ลองตามลำดับ: แหล่งที่เลือก -> (Twelve Data ถ้าเลือกสปอต) -> Yahoo อีกตัว -> (Twelve Data)
-    คืน (df, ข้อความ, รหัสแหล่งที่ใช้จริง) รหัส = สัญลักษณ์ Yahoo หรือ "TD" (สปอต)
-    resample = รวมแท่งเป็นแท่งใหญ่หลังโหลด (เช่น 1h -> 4h)"""
+def load(symbol, interval, period, resample=None):
+    """ลองแหล่งที่เลือกก่อน ถ้าไม่ได้ลองอีกตัว คืน (df, ข้อความ, สัญลักษณ์ที่ใช้จริง)"""
     other = "GC=F" if symbol == SPOT else SPOT
-    order = [("y", symbol)]
-    if key and symbol == SPOT:
-        order.append(("td", "TD"))
-    order.append(("y", other))
-    if key and symbol != SPOT:
-        order.append(("td", "TD"))
     notes = []
-    for kind, code in order:
-        df, note = load_yahoo(code, interval, period) if kind == "y" else load_td(interval, key)
+    for code in (symbol, other):
+        df, note = load_yahoo(code, interval, period)
         if df is not None and resample:
             df = resample_ohlc(df, resample)
             if len(df) < 260:
                 notes.append(f"{code}: รวมเป็น {resample} ได้ {len(df)} แท่ง ไม่พอ")
                 continue
         if df is not None:
-            name = f"Yahoo ({code})" if kind == "y" else "Twelve Data (XAU/USD)"
-            return df, f"ใช้ข้อมูล {name}" + ("" if code == symbol else " แทนแหล่งที่เลือก"), code
+            return df, f"ใช้ข้อมูล Yahoo ({code})" + ("" if code == symbol else " แทนแหล่งที่เลือก"), code
         notes.append(note)
     return None, " | ".join(n for n in notes if n), None
 
@@ -544,8 +602,7 @@ _NEW_ST = tuple(int(x) for x in st.__version__.split(".")[:2] if x.isdigit()) >=
 
 
 def stretch(fn, *args, **kw):
-    """เรียก st.dataframe / st.plotly_chart ให้เต็มความกว้าง รองรับทั้ง Streamlit เก่าและใหม่
-    (use_container_width ถูกเลิกใช้ในเวอร์ชันใหม่)"""
+    """เรียก st.dataframe / st.plotly_chart ให้เต็มความกว้าง รองรับทั้ง Streamlit เก่าและใหม่"""
     if _NEW_ST:
         try:
             return fn(*args, width="stretch", **kw)
@@ -556,7 +613,7 @@ def stretch(fn, *args, **kw):
 
 # ---------------- UI ----------------
 st.title("🪙 Gold Analyzer")
-st.caption("วิเคราะห์ XAUUSD หลายกลยุทธ์ ทั้ง BUY และ SELL ไม้สั้น/ไม้ยาว ไม่ใช่การรับประกันผล ตรวจกราฟจริงและตั้ง SL ทุกไม้")
+st.caption("วิเคราะห์ XAUUSD แบบรวมหลายเทคนิคเป็นระบบเดียว ทั้ง BUY และ SELL ไม่ใช่การรับประกันผล ตรวจกราฟจริงและตั้ง SL ทุกไม้")
 
 # CSS ทำครั้งเดียวนอก fragment: ไม่ให้ element จางลงตอนรีเฟรช
 st.markdown("""<style>
@@ -571,8 +628,8 @@ def live_view():
     chart_box = st.container()      # ตำแหน่งกราฟคงที่ ไม่ถูก mount ใหม่
     sym = SYMBOLS[sym_label]
     start_stream(sym)
-    key = (sym, tf)
-    df, src_note, src = load(sym, P["interval"], P["period"], td_key, P.get("resample"))
+    key = (sym, hold_key)
+    df, src_note, src = load(sym, P["interval"], P["period"], P.get("resample"))
     data_ok = df is not None
     if data_ok:
         st.session_state["last_good"] = dict(key=key, df=df, note=src_note, src=src, t=time.time())
@@ -584,16 +641,14 @@ def live_view():
         else:
             st.error("ดึงข้อมูลราคาไม่ได้ในตอนนี้")
             st.code(src_note or "ไม่มีรายละเอียด")
-            st.info("ถ้าเห็นว่า Yahoo ได้ 0 แท่งทุกตัว แปลว่า Yahoo ปิดกั้นเซิร์ฟเวอร์คลาวด์ ให้ใส่ Twelve Data API key (ฟรี) "
-                    "ที่แถบข้างซ้ายหัวข้อ 'แหล่งราคาสำรอง' หรือรอสักครู่แล้วลองใหม่")
+            st.info("Yahoo อาจปิดกั้นชั่วคราว (โดยเฉพาะบนเซิร์ฟเวอร์คลาวด์) รอสักครู่แล้วลองใหม่")
             return
 
-    # ถ้าแหล่งที่ใช้จริงเป็นสินค้าคนละประเภท (สปอต vs ฟิวเจอร์ส) ราคาจะต่างกันหลายดอลลาร์
-    if (sym == SPOT) != (src in (SPOT, "TD")):
+    if (sym == SPOT) != (src == SPOT):
         st.warning("แหล่งข้อมูลที่ใช้จริงเป็นคนละสินค้ากับที่เลือก (สปอต/ฟิวเจอร์สราคาต่างกันได้หลายดอลลาร์) "
-                   "ตรวจช่อง 'ส่วนต่างราคาโบรกเกอร์' ให้ตรงกับกราฟที่เทรดจริง")
+                   "ให้ใช้ตัวเลข 'ห่างจากราคาตอนนี้' ในตารางแทนราคาเต็ม")
 
-    # รวมราคาทิกสดเข้ากับกราฟ เพื่อให้ขยับทุกวินาที (ใช้ได้เฉพาะเมื่อข้อมูลมาจาก Yahoo สัญลักษณ์เดียวกัน)
+    # รวมราคาทิกสดเข้ากับกราฟ (ใช้ได้เฉพาะเมื่อข้อมูลมาจาก Yahoo สัญลักษณ์เดียวกัน)
     now_ts = pd.Timestamp.now(tz=TZ)
     data_age = now_ts - df.index[-1]
     live_age = None
@@ -604,7 +659,6 @@ def live_view():
         if merged is not None:
             df, live_age = merged, time.time() - lv["ts"]
 
-    # ข้อมูลเก่าเกินไป (ตลาดปิด/พักเที่ยง/ดึงไม่ได้) => ห้ามถือว่าสัญญาณเป็นปัจจุบัน
     stale = live_age is None and data_age > max(4 * P["step"], pd.Timedelta(minutes=5))
     fresh = data_ok and not stale
     if stale:
@@ -613,39 +667,40 @@ def live_view():
                    "สัญญาณด้านล่างอาจไม่ใช่ปัจจุบัน (ปิดการแจ้งเตือนอัตโนมัติไว้)")
 
     try:
-        A = analyse(df, P, offset, min_score, active)
+        A = analyse(df, P, min_score)
     except Exception as e:
         st.error(f"วิเคราะห์ข้อมูลไม่สำเร็จ: {e}")
         return
 
-    o = offset
+    px = A["price"]
     c1, c2, c3 = st.columns(3)
     prev = st.session_state.get("prev_price")
-    c1.metric("ราคาล่าสุด", f"{A['price'] + o:.2f}", None if prev is None else f"{A['price'] - prev:+.2f}")
-    st.session_state["prev_price"] = A["price"]
+    c1.metric("ราคาล่าสุด", f"{px:.2f}", None if prev is None else f"{px - prev:+.2f}")
+    st.session_state["prev_price"] = px
     c2.metric("ATR (ความผันผวน)", f"{A['atr']:.2f}")
     c3.metric("อัปเดตล่าสุด", datetime.now(ZoneInfo(TZ)).strftime("%H:%M:%S"))
 
     label = {"up": "ขาขึ้น 📈", "down": "ขาลง 📉", "side": "ไซด์เวย์ / ไม่ชัด ➖"}[A["bias"]]
-    regime_txt = "ตลาดมีเทรนด์" if A["regime"] == "trend" else "ตลาดไซด์เวย์"
+    regime_txt = {"trend": "ตลาดมีเทรนด์", "range": "ตลาดไซด์เวย์", "mixed": "ภาวะกำกวม (ไม่เทรด)"}[A["regime"]]
     st.subheader(f"แนวโน้ม {tf}: {label}")
-    st.caption(f"{P['style']} | {regime_txt} (ADX) | ใช้ {len(active)} กลยุทธ์ คะแนนขั้นต่ำ {min_score}")
+    st.caption(f"{hold_key} | {regime_txt} (ADX) | คะแนนขั้นต่ำ {min_score}")
 
-    p = A["plan"]
+    p, status = A["plan"], A["status"]
     zlo = zhi = None
     if p:
         zlo, zhi = p["lo"], p["hi"]
-        if zhi - zlo < 0.3 * A["atr"]:                     # โซนบางเกินไปให้ขยายให้มองเห็น
+        if zhi - zlo < 0.3 * A["atr"]:
             m = (zlo + zhi) / 2
             zlo, zhi = m - 0.15 * A["atr"], m + 0.15 * A["atr"]
         zlo, zhi = float(zlo), float(zhi)
 
     if p:
         buy_ = p["side"] == "buy"
-        px = A["price"]
         in_zone = zlo <= px <= zhi
+        now_ = status == "now"
         if in_zone:
-            state_txt = "🎯 ราคาอยู่ในโซนเข้าแล้ว" if A["status"] == "now" else "🎯 ราคาแตะโซนแล้ว (รอแท่งปิดยืนยันสัญญาณ)"
+            state_txt = ("🎯 ราคาอยู่ในโซนเข้าแล้ว" if now_
+                         else "🎯 ราคาแตะโซนแล้ว แต่ยังไม่มีแท่งปิดยืนยัน ห้ามเข้าทันที")
         elif px > zhi:
             gap = px - zhi
             state_txt = (f"⏳ รอราคา<b>ลง</b>อีก {gap:.2f} ดอลลาร์ ถึงจะเข้าโซน" if buy_
@@ -654,88 +709,107 @@ def live_view():
             gap = zlo - px
             state_txt = (f"⚠️ ราคาอยู่<b>ใต้</b>โซน BUY {gap:.2f} ดอลลาร์ (เลยโซนไปแล้ว อย่าไล่เข้า)" if buy_
                          else f"⏳ รอราคา<b>ขึ้น</b>อีก {gap:.2f} ดอลลาร์ ถึงจะเข้าโซน")
-        color = "#00b050" if buy_ else "#e02020"
-        head = {"now": f"✅ สัญญาณเข้า {p['side'].upper()} ตอนนี้",
-                "wait": f"โซนรอเข้า {p['side'].upper()}"}[A["status"]]
+        side_txt = "BUY" if buy_ else "SELL"
+        if now_:
+            color = "#00b050" if buy_ else "#e02020"
+            head = f"✅ เข้า {side_txt} ได้ตอนนี้ · {STRATS[p['strat']]}"
+            border = "solid"
+            foot = "แท่งสัญญาณปิดยืนยันแล้ว เข้าในโซนแล้วตั้ง SL ตามด้านบนทันที"
+        else:
+            color = "#b8860b"
+            head = f"👀 เฝ้ารอ {side_txt} · ยังไม่ใช่สัญญาณเข้า อย่าเพิ่งกดออเดอร์"
+            border = "dashed"
+            foot = "จะเข้าได้ก็ต่อเมื่อการ์ดนี้เปลี่ยนเป็น '✅ เข้าได้ตอนนี้' (มีแท่งปิดยืนยันครบ)"
         st.markdown(
-            f"""<div style="border:3px solid {color};border-radius:12px;padding:14px 18px;margin:6px 0 12px 0;
+            f"""<div style="border:3px {border} {color};border-radius:12px;padding:14px 18px;margin:6px 0 12px 0;
             background:{color}18;">
-            <div style="font-size:1.05rem;font-weight:700;color:{color};">{head} · {STRATS[p['strat']]}</div>
+            <div style="font-size:1.05rem;font-weight:700;color:{color};">{head}</div>
             <div style="font-size:2.1rem;font-weight:800;line-height:1.25;">
-            {'🟢 BUY' if buy_ else '🔴 SELL'} โซนเข้า {zlo + o:.2f} – {zhi + o:.2f}</div>
+            {'🟢 BUY' if buy_ else '🔴 SELL'} โซน {zlo:.2f} – {zhi:.2f}</div>
             <div style="font-size:1.05rem;margin:4px 0 8px 0;">{state_txt}</div>
             <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:1rem;">
-            <span>🛑 SL <b>{p['sl'] + o:.2f}</b></span>
-            <span>🎯 TP1 <b>{p['tp1'] + o:.2f}</b></span>
-            <span>🎯 TP2 <b>{p['tp2'] + o:.2f}</b></span>
+            <span>🛑 SL <b>{p['sl']:.2f}</b></span>
+            <span>🎯 TP1 <b>{p['tp1']:.2f}</b></span>
+            <span>🎯 TP2 <b>{p['tp2']:.2f}</b></span>
             <span>RR <b>1 : {p['rr']:.1f}</b></span></div>
-            <div style="font-size:0.85rem;opacity:0.75;margin-top:6px;">
-            ขาเข้าจริงให้รอให้ราคาเข้ากรอบโซนก่อน แล้วค่อยตั้ง SL ตามด้านบน</div>
+            <div style="font-size:0.85rem;opacity:0.75;margin-top:6px;">{foot}</div>
             </div>""", unsafe_allow_html=True)
-        sc_txt = "ความมั่นใจของสัญญาณ" if A["status"] == "now" else "คะแนนเงื่อนไขตอนนี้ (ถ้าถึงโซนแล้วยืนยันครบ)"
+        sc_txt = "ความมั่นใจของสัญญาณ" if now_ else "คะแนนเงื่อนไขตอนนี้ (ถ้าถึงโซนแล้วยืนยันครบ)"
         st.progress(min(1.0, max(0.0, p["score"] / 100)), text=f"{sc_txt}: {p['score']:.0f}/100")
         others = [f"{SHORT[k]} {s.upper()} ({sc:.0f})" for k, s, sc in A["fired"][1:]]
         if others:
             st.caption("กลยุทธ์อื่นที่ให้สัญญาณพร้อมกันที่แท่งนี้: " + ", ".join(others))
+    elif status in ("dead", "late"):
+        st.warning("⛔ " + A["msg"])
     else:
-        st.warning("⛔ ยังไม่ควรเข้าไม้ ไม่มีสัญญาณและแนวโน้ม/ไซด์เวย์ยังไม่เข้าเงื่อนไขของกลยุทธ์ที่เลือก รอก่อน")
+        st.warning("⛔ ยังไม่ควรเข้าไม้ · " + A["msg"])
 
     if p:
-        lot, lot_note = lot_for(p["sl_dist"], balance, risk_pct, contract, min_lot)
-        t = pd.DataFrame({
-            "รายการ": ["ทิศทาง", "กลยุทธ์", "โซนเข้า", "Stop loss", "TP1", "TP2", "RR ถึง TP1", "ระยะ SL", "lot ที่แนะนำ"],
-            "ค่า": [p["side"].upper(), STRATS[p["strat"]],
-                    f"{zlo + o:.2f} - {zhi + o:.2f}",
-                    f"{p['sl'] + o:.2f}", f"{p['tp1'] + o:.2f}", f"{p['tp2'] + o:.2f}",
-                    f"1 : {p['rr']:.1f}", f"{p['sl_dist']:.2f} ดอลลาร์",
-                    f"{lot:.2f}  ({lot_note})" if lot else "ไม่เปิด: " + lot_note],
-        })
+        def dist(v):
+            return f"{v - px:+.2f}"
+
+        rows = [
+            ("ทิศทาง", p["side"].upper(), "-"),
+            ("กลยุทธ์", STRATS[p["strat"]], "-"),
+            ("โซนเข้า", f"{zlo:.2f} - {zhi:.2f}", dist((zlo + zhi) / 2)),
+            ("Stop loss", f"{p['sl']:.2f}", dist(p["sl"])),
+            ("TP1", f"{p['tp1']:.2f}", dist(p["tp1"])),
+            ("TP2", f"{p['tp2']:.2f}", dist(p["tp2"])),
+            ("RR ถึง TP1", f"1 : {p['rr']:.1f}", "-"),
+            ("ระยะ SL", f"{p['sl_dist']:.2f} ดอลลาร์", "-"),
+            ("ระยะเวลาถือ", P["hold"], "-"),
+        ]
+        t = pd.DataFrame(rows, columns=["รายการ", "ค่า", "ห่างจากราคาตอนนี้ ($)"])
         stretch(st.dataframe, t, hide_index=True, key="tbl-plan")
+        st.caption("ราคา Yahoo อาจต่างจากโบรกเกอร์ใน MT5 ได้ไม่กี่ดอลลาร์ ถ้าไม่ตรง ให้ใช้คอลัมน์ 'ห่างจากราคาตอนนี้' "
+                   "นับจากราคาที่เห็นใน MT5 แทนตัวเลขเต็ม")
         for w in A["warns"]:
             st.warning(w)
 
-        if A["status"] == "now" and fresh and tg_token and tg_chat:
-            akey = f"{sym}|{tf}|{A['bar']}"
+        if status == "now" and fresh and tg_token and tg_chat:
+            akey = f"{sym}|{hold_key}|{A['bar']}"
             if st.session_state.get("last_alert") != akey:      # แจ้งครั้งเดียวต่อแท่ง
                 st.session_state["last_alert"] = akey
-                msg = (f"สัญญาณ {p['side'].upper()} XAUUSD {tf} ({P['style']})\nกลยุทธ์ {STRATS[p['strat']]} "
-                       f"คะแนน {p['score']:.0f}/100\nเข้า ~{p['mid'] + o:.2f}\nSL {p['sl'] + o:.2f}\n"
-                       f"TP1 {p['tp1'] + o:.2f} | TP2 {p['tp2'] + o:.2f}\nlot {lot:.2f}")
+                msg = (f"สัญญาณ {p['side'].upper()} XAUUSD {tf} ({hold_key})\nกลยุทธ์ {STRATS[p['strat']]} "
+                       f"คะแนน {p['score']:.0f}/100\nโซนเข้า {zlo:.2f}-{zhi:.2f} (ราคา Yahoo ตอนนี้ {px:.2f})\n"
+                       f"SL {p['sl']:.2f} ({dist(p['sl'])})\nTP1 {p['tp1']:.2f} ({dist(p['tp1'])}) | "
+                       f"TP2 {p['tp2']:.2f} ({dist(p['tp2'])})\n{P['hold']}")
                 threading.Thread(target=send_tg, args=(msg, tg_token, tg_chat), daemon=True).start()
 
     with st.expander("เงื่อนไขที่ใช้ตัดสิน", expanded=False):
         for k, v in A["checks"].items():
             st.write(("✅ " if v else "❌ ") + k)
-        st.write(f"แนวรับใกล้สุด: {A['sup'] + o:.2f}" if A["sup"] else "แนวรับใกล้สุด: -")
-        st.write(f"แนวต้านใกล้สุด: {A['res'] + o:.2f}" if A["res"] else "แนวต้านใกล้สุด: -")
+        st.write(f"แนวรับใกล้สุด: {A['sup']:.2f}" if A["sup"] else "แนวรับใกล้สุด: -")
+        st.write(f"แนวต้านใกล้สุด: {A['res']:.2f}" if A["res"] else "แนวต้านใกล้สุด: -")
 
     with st.expander("เปรียบเทียบกลยุทธ์ + สัญญาณล่าสุด + ผลย้อนหลังคร่าวๆ", expanded=False):
-        bkey = (sym, tf, src, str(A["bar"]), active, min_score)
+        bkey = (sym, hold_key, src, str(A["bar"]), min_score)
         if st.session_state.get("bt_key") != bkey:             # คำนวณใหม่เฉพาะเมื่อมีแท่งปิดใหม่
             st.session_state["bt_key"] = bkey
-            st.session_state["bt"] = backtest(A["d"], P, active, P["max_bars"])
+            st.session_state["bt"] = backtest(A["d"], P)
         bt = st.session_state["bt"]
         dd = A["d"]
-        rows = []
+        brow = []
         for k, nm in STRATS.items():
             r = bt[k]
             now = "BUY" if dd[f"{k}_buy"].iloc[-2] else "SELL" if dd[f"{k}_sell"].iloc[-2] else "-"
-            rows.append({"กลยุทธ์": nm, "ใช้อยู่": "✅" if k in active else "—", "สัญญาณตอนนี้": now,
-                         "ไม้ย้อนหลัง": r["n"], "ชนะ %": f"{r['winrate']:.0f}" if r["n"] else "-",
-                         "ค่าคาดหวัง R/ไม้": f"{r['exp_r']:+.2f}" if r["n"] else "-"})
+            brow.append({"กลยุทธ์": nm, "สัญญาณตอนนี้": now, "ไม้ย้อนหลัง": r["n"],
+                         "ชนะ %": f"{r['winrate']:.0f}" if r["n"] else "-",
+                         "ค่าคาดหวัง R/ไม้": f"{r['exp_r']:+.2f}" if r["n"] else "-",
+                         "หมดเวลาถือ": r["timeouts"]})
         r = bt["all"]
-        rows.append({"กลยุทธ์": "รวมที่เลือก (เลือกสัญญาณคะแนนสูงสุด)", "ใช้อยู่": "", "สัญญาณตอนนี้": "",
+        brow.append({"กลยุทธ์": "รวมทั้งระบบ (เลือกสัญญาณคะแนนสูงสุด)", "สัญญาณตอนนี้": "",
                      "ไม้ย้อนหลัง": r["n"], "ชนะ %": f"{r['winrate']:.0f}" if r["n"] else "-",
-                     "ค่าคาดหวัง R/ไม้": f"{r['exp_r']:+.2f}" if r["n"] else "-"})
-        stretch(st.dataframe, pd.DataFrame(rows), hide_index=True, key="tbl-bt")
+                     "ค่าคาดหวัง R/ไม้": f"{r['exp_r']:+.2f}" if r["n"] else "-", "หมดเวลาถือ": r["timeouts"]})
+        stretch(st.dataframe, pd.DataFrame(brow), hide_index=True, key="tbl-bt")
         st.caption("ค่าคาดหวัง R/ไม้ > 0 = ในข้อมูลช่วงสั้นที่โหลดมา กลยุทธ์นั้นเฉลี่ยกำไร (1R = เสี่ยงต่อไม้หนึ่งหน่วย) "
-                   "จำลองเข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL/TP1 ยังไม่รวมสเปรด/สลิป จำนวนไม้น้อยอาจแกว่งมาก "
-                   "ใช้เทียบกลยุทธ์กันเท่านั้น ผลในอดีตไม่รับประกันอนาคต อย่าปรับพารามิเตอร์จนผลย้อนหลังสวยเกินจริง")
+                   f"จำลองเข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL / TP1 หรือปิดที่ราคาตลาดเมื่อครบเวลาถือ ({P['max_bars']} แท่ง) "
+                   "ยังไม่รวมสเปรด/สลิป จำนวนไม้น้อยอาจแกว่งมาก ใช้เทียบกลยุทธ์กันเท่านั้น ผลในอดีตไม่รับประกันอนาคต")
 
         sg = dd[dd.buy_sig | dd.sell_sig].tail(6).iloc[::-1]
         if len(sg):
             def names(row):
-                ks = [SHORT[k] for k in active if row[f"{k}_buy"] or row[f"{k}_sell"]]
+                ks = [SHORT[k] for k in STRATS if row[f"{k}_buy"] or row[f"{k}_sell"]]
                 return "+".join(ks)
 
             stretch(
@@ -745,7 +819,7 @@ def live_view():
                     "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
                     "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
                     "คะแนน": [f"{(b if bs_ else s):.0f}" for b, s, bs_ in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
-                    "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close],
+                    "ราคาปิดแท่งนั้น": [f"{x:.2f}" for x in sg.close],
                 }),
                 hide_index=True,
                 key="tbl-sig",
@@ -757,25 +831,24 @@ def live_view():
     d = A["d"].tail(120).copy()
     d.index = d.index.tz_localize(None)
     x_end = d.index[-1] + P["step"] * 14
-    fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o,
+    fig = go.Figure(go.Candlestick(x=d.index, open=d.open, high=d.high, low=d.low, close=d.close,
                                    name="ราคา", increasing_line_color="#1b7a62", decreasing_line_color="#b3372f"))
     for col_, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
-        fig.add_trace(go.Scatter(x=d.index, y=d[col_] + o, name=nm, line=dict(width=1.2)))
-    if "reversal" in active:
+        fig.add_trace(go.Scatter(x=d.index, y=d[col_], name=nm, line=dict(width=1.2)))
+    if p and p["strat"] == "reversal":
         for col_ in ("bb_u", "bb_l"):
-            fig.add_trace(go.Scatter(x=d.index, y=d[col_] + o, name="Bollinger", legendgroup="bb",
+            fig.add_trace(go.Scatter(x=d.index, y=d[col_], name="Bollinger", legendgroup="bb",
                                      showlegend=(col_ == "bb_u"), line=dict(width=1, dash="dot", color="#8a8a8a")))
 
-    # ลูกศรสัญญาณ: เขียวชี้ขึ้น = BUY (ใต้แท่ง), แดงชี้ลง = SELL (เหนือแท่ง)
     bsig, ssig = d[d.buy_sig], d[d.sell_sig]
     if len(bsig):
-        fig.add_trace(go.Scatter(x=bsig.index, y=bsig.low + o - 0.5 * bsig.atr, mode="markers", name="สัญญาณ BUY",
+        fig.add_trace(go.Scatter(x=bsig.index, y=bsig.low - 0.5 * bsig.atr, mode="markers", name="สัญญาณ BUY",
                                  marker=dict(symbol="triangle-up", size=17, color="#00b050",
                                              line=dict(width=1, color="#005a28")),
                                  text=[f"{x:.0f}" for x in bsig.buy_sc],
                                  hovertemplate="BUY คะแนน %{text}<extra></extra>"))
     if len(ssig):
-        fig.add_trace(go.Scatter(x=ssig.index, y=ssig.high + o + 0.5 * ssig.atr, mode="markers", name="สัญญาณ SELL",
+        fig.add_trace(go.Scatter(x=ssig.index, y=ssig.high + 0.5 * ssig.atr, mode="markers", name="สัญญาณ SELL",
                                  marker=dict(symbol="triangle-down", size=17, color="#e02020",
                                              line=dict(width=1, color="#7a0000")),
                                  text=[f"{x:.0f}" for x in ssig.sell_sc],
@@ -784,29 +857,30 @@ def live_view():
     # กรอบโซนเข้า + แถบเป้ากำไร + เส้น SL/TP
     if p:
         buy = p["side"] == "buy"
-        col, fill = ("#00b050", "rgba(0,176,80,0.30)") if buy else ("#e02020", "rgba(224,32,32,0.30)")
+        now_ = status == "now"
+        if now_:
+            col, fill = ("#00b050", "rgba(0,176,80,0.30)") if buy else ("#e02020", "rgba(224,32,32,0.30)")
+        else:
+            col, fill = "#b8860b", "rgba(184,134,11,0.22)"
         tint = "rgba(0,176,80,0.08)" if buy else "rgba(224,32,32,0.08)"
-        lo, hi = zlo, zhi
-        x0 = d.index[-45]
-        fig.add_shape(type="line", x0=x0, x1=x_end, y0=A["price"] + o, y1=A["price"] + o,
-                      line=dict(color="#1f6feb", width=1.5))
-        fig.add_annotation(x=d.index[0], y=A["price"] + o, xanchor="left", yanchor="bottom", showarrow=False,
-                           text=f"ราคา {A['price'] + o:.2f}", font=dict(color="#1f6feb", size=12))
-        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=min(p["mid"], p["tp1"]) + o, y1=max(p["mid"], p["tp1"]) + o,
+        x0 = d.index[-30]
+        fig.add_shape(type="line", x0=x0, x1=x_end, y0=px, y1=px, line=dict(color="#1f6feb", width=1.5))
+        fig.add_annotation(x=d.index[0], y=px, xanchor="left", yanchor="bottom", showarrow=False,
+                           text=f"ราคา {px:.2f}", font=dict(color="#1f6feb", size=12))
+        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=min(p["mid"], p["tp1"]), y1=max(p["mid"], p["tp1"]),
                       fillcolor=tint, line=dict(width=0), layer="below")
-        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=lo + o, y1=hi + o, fillcolor=fill,
-                      line=dict(color=col, width=2.5, dash="solid" if A["status"] == "now" else "dash"))
-        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False,
-                           font=dict(color=col, size=15),
-                           text=f"<b>โซนเข้า {'BUY' if buy else 'SELL'}</b> {lo + o:.2f}-{hi + o:.2f}",
+        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=zlo, y1=zhi, fillcolor=fill,
+                      line=dict(color=col, width=2.5, dash="solid" if now_ else "dash"))
+        tag = ("เข้า " if now_ else "เฝ้ารอ ") + ("BUY" if buy else "SELL")
+        fig.add_annotation(x=x_end, y=(zlo + zhi) / 2, xanchor="right", showarrow=False,
+                           font=dict(color=col, size=15), text=f"<b>{tag}</b> {zlo:.2f}-{zhi:.2f}",
                            bgcolor="rgba(255,255,255,0.92)", bordercolor=col, borderwidth=2)
         for y, nm, c2_ in ((p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f"), (p["tp2"], "TP2", "#a87a1f")):
-            fig.add_shape(type="line", x0=x0, x1=x_end, y0=y + o, y1=y + o,
-                          line=dict(color=c2_, width=1.5, dash="dot"))
-            fig.add_annotation(x=x_end, y=y + o, xanchor="right", yanchor="bottom", showarrow=False,
-                               text=f"{nm} {y + o:.1f}", font=dict(color=c2_, size=12))
+            fig.add_shape(type="line", x0=x0, x1=x_end, y0=y, y1=y, line=dict(color=c2_, width=1.5, dash="dot"))
+            fig.add_annotation(x=x_end, y=y, xanchor="right", yanchor="bottom", showarrow=False,
+                               text=f"{nm} {y:.1f}", font=dict(color=c2_, size=12))
 
-    rev = f"{sym}-{tf}"                 # เปลี่ยนเฉพาะตอนสลับสินค้า/Timeframe
+    rev = f"{sym}-{hold_key}"           # เปลี่ยนเฉพาะตอนสลับสินค้า/ระยะเวลาถือไม้
     fig.update_xaxes(range=[d.index[0], x_end], uirevision=rev)
     fig.update_yaxes(uirevision=rev)
     fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0),
@@ -814,11 +888,11 @@ def live_view():
                       uirevision=rev, transition=dict(duration=0))
 
     stretch(chart_box.plotly_chart, fig, config=dict(displaylogo=False, scrollZoom=True),
-            key=f"chart-{sym}-{tf}")
+            key=f"chart-{sym}-{hold_key}")
     st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
                            else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
     st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ "
-               "อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
+               "อาจช้ากว่าและกระโดดเป็นช่วงๆ")
 
 
 live_view()
