@@ -103,6 +103,13 @@ def add_ind(df):
     pc = c.shift(1)
     tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    # สัญญาณย้อนหลังทุกแท่ง (ใช้เงื่อนไขเดียวกับสัญญาณปัจจุบัน) ไว้วาดลูกศรบนกราฟ
+    up_t = (df.close > df.ema_t) & (df.ema_t > df.ema_t.shift(5)) & (df.ema_f > df.ema_s)
+    dn_t = (df.close < df.ema_t) & (df.ema_t < df.ema_t.shift(5)) & (df.ema_f < df.ema_s)
+    df["buy_sig"] = up_t & (df.low <= df.ema_f) & (df.close > df.ema_f) & df.rsi.between(45, 68)
+    df["sell_sig"] = dn_t & (df.high >= df.ema_f) & (df.close < df.ema_f) & df.rsi.between(32, 55)
+    df.iloc[-1, df.columns.get_loc("buy_sig")] = False    # แท่งสุดท้ายยังไม่ปิด ไม่นับ
+    df.iloc[-1, df.columns.get_loc("sell_sig")] = False
     return df
 
 
@@ -259,13 +266,46 @@ def live_view():
 
     # กราฟ
     d = A["d"].tail(120)
-    fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o, name="ราคา"))
+    step = d.index[-1] - d.index[-2]
+    x_end = d.index[-1] + step * 14
+    fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o,
+                                   name="ราคา", increasing_line_color="#1b7a62", decreasing_line_color="#b3372f"))
     for col, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
         fig.add_trace(go.Scatter(x=d.index, y=d[col] + o, name=nm, line=dict(width=1.2)))
+
+    # ลูกศรสัญญาณ: เขียวชี้ขึ้น = BUY (ใต้แท่ง), แดงชี้ลง = SELL (เหนือแท่ง)
+    bs, ss = d[d.buy_sig], d[d.sell_sig]
+    if len(bs):
+        fig.add_trace(go.Scatter(x=bs.index, y=bs.low + o - 0.5 * bs.atr, mode="markers", name="สัญญาณ BUY",
+                                 marker=dict(symbol="triangle-up", size=17, color="#00b050", line=dict(width=1, color="#005a28")),
+                                 hovertemplate="BUY ที่แท่งนี้<extra></extra>"))
+    if len(ss):
+        fig.add_trace(go.Scatter(x=ss.index, y=ss.high + o + 0.5 * ss.atr, mode="markers", name="สัญญาณ SELL",
+                                 marker=dict(symbol="triangle-down", size=17, color="#e02020", line=dict(width=1, color="#7a0000")),
+                                 hovertemplate="SELL ที่แท่งนี้<extra></extra>"))
+
+    # กรอบโซนเข้า + แถบเป้ากำไร + เส้น SL/TP
     if p:
-        for y, nm, colr in ((p["lo"], "เข้า", "#1b7a62"), (p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f")):
-            fig.add_hline(y=y + o, line_dash="dot", line_color=colr, annotation_text=nm)
-    fig.update_layout(height=430, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
+        buy = p["side"] == "buy"
+        col, fill = ("#00b050", "rgba(0,176,80,0.30)") if buy else ("#e02020", "rgba(224,32,32,0.30)")
+        tint = "rgba(0,176,80,0.08)" if buy else "rgba(224,32,32,0.08)"
+        lo, hi = p["lo"], p["hi"]
+        if hi - lo < 0.3 * A["atr"]:                       # โซนบางเกินไปให้ขยายให้มองเห็น
+            m = (lo + hi) / 2
+            lo, hi = m - 0.15 * A["atr"], m + 0.15 * A["atr"]
+        x0 = d.index[-45]
+        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=min(p["mid"], p["tp1"]) + o, y1=max(p["mid"], p["tp1"]) + o,
+                      fillcolor=tint, line=dict(width=0), layer="below")
+        fig.add_shape(type="rect", x0=x0, x1=x_end, y0=lo + o, y1=hi + o, fillcolor=fill,
+                      line=dict(color=col, width=2.5, dash="solid" if A["status"] == "now" else "dash"))
+        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False, font=dict(color=col, size=13),
+                           text=f"<b>โซน {'BUY' if buy else 'SELL'}</b> {lo + o:.1f}-{hi + o:.1f}", bgcolor="rgba(255,255,255,0.85)")
+        for y, nm, c2_ in ((p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f"), (p["tp2"], "TP2", "#a87a1f")):
+            fig.add_shape(type="line", x0=x0, x1=x_end, y0=y + o, y1=y + o, line=dict(color=c2_, width=1.5, dash="dot"))
+            fig.add_annotation(x=x_end, y=y + o, xanchor="right", yanchor="bottom", showarrow=False,
+                               text=f"{nm} {y + o:.1f}", font=dict(color=c2_, size=12))
+    fig.update_xaxes(range=[d.index[0], x_end])
+    fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
                       legend=dict(orientation="h", y=1.08))
     st.plotly_chart(fig, use_container_width=True)
     st.caption(src_note)
