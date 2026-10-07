@@ -417,7 +417,7 @@ td_key = sb.text_input("Twelve Data API key", value=_secret("TWELVE_KEY"), type=
                        help="สมัครฟรีที่ twelvedata.com ใช้เมื่อ Yahoo ไม่ส่งข้อมูล (เซิร์ฟเวอร์คลาวด์มักถูก Yahoo จำกัด) "
                             "โควตาฟรีจำกัด แอปจึงดึงจากแหล่งนี้ไม่เกินทุก ~2 นาที")
 
-speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60], index=1,
+speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60], index=3,
                      help="เร็วสุดที่ Streamlit วาดกราฟทั้งใบใหม่ได้จริงคือราว 0.1 วินาที (0.01 วินาที = 100 ครั้ง/วินาที ทำไม่ได้ "
                           "และ Yahoo ส่งทิกมาราว 1 ครั้ง/วินาที จึงไม่มีราคาใหม่ให้วาดถี่ขนาดนั้น) "
                           "ถ้าเครื่องหรือเน็ตช้าให้เลือก 0.5-1 วินาที ข้อมูลแท่งเทียนย้อนหลังดึงใหม่ทุก ~5 วินาที")
@@ -498,6 +498,7 @@ def load(symbol, interval, period, key, resample=None):
             if len(df) < 260:
                 notes.append(f"{code}: รวมเป็น {resample} ได้ {len(df)} แท่ง ไม่พอ")
                 continue
+                  
         if df is not None:
             name = f"Yahoo ({code})" if kind == "y" else "Twelve Data (XAU/USD)"
             return df, f"ใช้ข้อมูล {name}" + ("" if code == symbol else " แทนแหล่งที่เลือก"), code
@@ -682,13 +683,14 @@ def live_view():
                     f"1 : {p['rr']:.1f}", f"{p['sl_dist']:.2f} ดอลลาร์",
                     f"{lot:.2f}  ({lot_note})" if lot else "ไม่เปิด: " + lot_note],
         })
-        stretch(st.dataframe, t, hide_index=True)
+        stretch(st.dataframe, t, hide_index=True, key="tbl-plan")
         for w in A["warns"]:
             st.warning(w)
 
         if A["status"] == "now" and fresh and tg_token and tg_chat:
             akey = f"{sym}|{tf}|{A['bar']}"
             if st.session_state.get("last_alert") != akey:      # แจ้งครั้งเดียวต่อแท่ง
+
                 st.session_state["last_alert"] = akey
                 msg = (f"สัญญาณ {p['side'].upper()} XAUUSD {tf} ({P['style']})\nกลยุทธ์ {STRATS[p['strat']]} "
                        f"คะแนน {p['score']:.0f}/100\nเข้า ~{p['mid'] + o:.2f}\nSL {p['sl'] + o:.2f}\n"
@@ -719,7 +721,7 @@ def live_view():
         rows.append({"กลยุทธ์": "รวมที่เลือก (เลือกสัญญาณคะแนนสูงสุด)", "ใช้อยู่": "", "สัญญาณตอนนี้": "",
                      "ไม้ย้อนหลัง": r["n"], "ชนะ %": f"{r['winrate']:.0f}" if r["n"] else "-",
                      "ค่าคาดหวัง R/ไม้": f"{r['exp_r']:+.2f}" if r["n"] else "-"})
-        stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+        stretch(st.dataframe, pd.DataFrame(rows), hide_index=True, key="tbl-bt")
         st.caption("ค่าคาดหวัง R/ไม้ > 0 = ในข้อมูลช่วงสั้นที่โหลดมา กลยุทธ์นั้นเฉลี่ยกำไร (1R = เสี่ยงต่อไม้หนึ่งหน่วย) "
                    "จำลองเข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL/TP1 ยังไม่รวมสเปรด/สลิป จำนวนไม้น้อยอาจแกว่งมาก "
                    "ใช้เทียบกลยุทธ์กันเท่านั้น ผลในอดีตไม่รับประกันอนาคต อย่าปรับพารามิเตอร์จนผลย้อนหลังสวยเกินจริง")
@@ -733,7 +735,7 @@ def live_view():
                 "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
                 "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
                 "คะแนน": [f"{(b if bs else s):.0f}" for b, s, bs in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
-                "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close]}), hide_index=True)
+                "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close]}), , key="tbl-sig"
 
     # กราฟ (ตัด timezone ออกเพื่อให้ Plotly แสดงเวลาไทยตรงๆ)
     d = A["d"].tail(120).copy()
@@ -786,10 +788,13 @@ def live_view():
     # uirevision: ซูม/เลื่อนกราฟแล้วไม่ถูกรีเซ็ตทุกครั้งที่รีเฟรช
     fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
                       legend=dict(orientation="h", y=1.08), uirevision=f"{sym}-{tf}")
-    stretch(st.plotly_chart, fig, config=dict(displaylogo=False))
+        stretch(st.plotly_chart, fig, config=dict(displaylogo=False), key=f"chart-{sym}-{tf}")
     st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
                            else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
     st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
-
+st.markdown("""<style>
+[data-stale="true"], .stale-element, [data-testid="stElementContainer"][data-stale="true"]
+{opacity:1 !important; transition:none !important;}
+</style>""", unsafe_allow_html=True)
 
 live_view()
