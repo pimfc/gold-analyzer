@@ -4,6 +4,7 @@ Gold Analyzer - แอปวิเคราะห์ราคาทอง XAUUSD
 รันด้วย: streamlit run app.py   (หรือดับเบิลคลิก run.bat)
 """
 import time
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import requests
@@ -47,8 +48,8 @@ except Exception:
 td_key = sb.text_input("Twelve Data API key", value=_sec, type="password",
                        help="สมัครฟรีที่ twelvedata.com ใช้เมื่อ Yahoo ไม่ส่งข้อมูล (เซิร์ฟเวอร์คลาวด์มักถูก Yahoo จำกัด)")
 
-speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [5, 10, 30, 60], index=1,
-                     help="ยิ่งถี่ยิ่งเสี่ยงโดน Yahoo จำกัดการเข้าถึง ถ้าข้อมูลหาย ให้เพิ่มเป็น 10-30 วินาที")
+speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [1, 2, 5, 10, 30, 60], index=0,
+                     help="ราคาล่าสุดมาจากทิกสด (WebSocket) จึงอัปเดตทุก 1 วินาทีได้ ส่วนข้อมูลแท่งเทียนย้อนหลังดึงใหม่ทุก ~4 วินาที")
 P = PROFILES[tf]
 
 
@@ -89,6 +90,40 @@ def load(symbol, interval, period, td_key):
         except Exception as e:
             notes.append(f"Twelve Data: {type(e).__name__}")
     return None, " | ".join(notes)
+
+
+LIVE = {}   # symbol -> {"price": ราคาล่าสุด, "ts": เวลาที่รับ}
+
+
+@st.cache_resource
+def start_stream(symbol):
+    """เปิด WebSocket ของ Yahoo ไว้เบื้องหลัง รับราคาทิกสดเก็บไว้ใน LIVE (เปิดครั้งเดียวต่อสัญลักษณ์)"""
+    if not hasattr(yf, "WebSocket"):
+        return None
+
+    def handler(msg):
+        try:
+            if msg.get("id") not in (None, symbol):
+                return
+            price = msg.get("price")
+            if price is not None:
+                LIVE[symbol] = {"price": float(price), "ts": time.time()}
+        except Exception:
+            pass
+
+    def run():
+        while True:
+            try:
+                with yf.WebSocket() as ws:
+                    ws.subscribe([symbol])
+                    ws.listen(handler)
+            except Exception:
+                pass
+            time.sleep(5)   # หลุดแล้วต่อใหม่
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
 
 
 def add_ind(df):
@@ -214,6 +249,19 @@ def live_view():
         st.info("ถ้าเห็นว่า Yahoo ได้ 0 แท่งทุกตัว แปลว่า Yahoo ปิดกั้นเซิร์ฟเวอร์คลาวด์ ให้ใส่ Twelve Data API key (ฟรี) "
                 "ที่แถบข้างซ้ายหัวข้อ 'แหล่งราคาสำรอง' หรือรอสักครู่แล้วลองใหม่")
         return
+    # รวมราคาทิกสดเข้ากับแท่งสุดท้าย เพื่อให้กราฟขยับทุกวินาที
+    sym = SYMBOLS[sym_label]
+    start_stream(sym)
+    lv = LIVE.get(sym)
+    live_age = None if not lv else time.time() - lv["ts"]
+    if lv and live_age < 20 and f"({sym})" in src_note:
+        df = df.copy()
+        i = df.index[-1]
+        df.loc[i, "close"] = lv["price"]
+        df.loc[i, "high"] = max(df.loc[i, "high"], lv["price"])
+        df.loc[i, "low"] = min(df.loc[i, "low"], lv["price"])
+    else:
+        live_age = None
     try:
         A = analyse(df)
     except Exception as e:
@@ -308,7 +356,8 @@ def live_view():
     fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
                       legend=dict(orientation="h", y=1.08))
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(src_note)
+    st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
+                           else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
     st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
 
 
