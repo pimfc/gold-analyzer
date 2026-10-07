@@ -558,9 +558,17 @@ def stretch(fn, *args, **kw):
 st.title("🪙 Gold Analyzer")
 st.caption("วิเคราะห์ XAUUSD หลายกลยุทธ์ ทั้ง BUY และ SELL ไม้สั้น/ไม้ยาว ไม่ใช่การรับประกันผล ตรวจกราฟจริงและตั้ง SL ทุกไม้")
 
+# CSS ทำครั้งเดียวนอก fragment: ไม่ให้ element จางลงตอนรีเฟรช
+st.markdown("""<style>
+[data-stale="true"], .stale-element,
+[data-testid="stElementContainer"][data-stale="true"],
+[data-testid="stPlotlyChart"] {opacity:1 !important; transition:none !important;}
+</style>""", unsafe_allow_html=True)
+
 
 @st.fragment(run_every=speed)
 def live_view():
+    chart_box = st.container()      # ตำแหน่งกราฟคงที่ ไม่ถูก mount ใหม่
     sym = SYMBOLS[sym_label]
     start_stream(sym)
     key = (sym, tf)
@@ -798,19 +806,19 @@ def live_view():
             fig.add_annotation(x=x_end, y=y + o, xanchor="right", yanchor="bottom", showarrow=False,
                                text=f"{nm} {y + o:.1f}", font=dict(color=c2_, size=12))
 
-    fig.update_xaxes(range=[d.index[0], x_end])
+    rev = f"{sym}-{tf}"                 # เปลี่ยนเฉพาะตอนสลับสินค้า/Timeframe
+    fig.update_xaxes(range=[d.index[0], x_end], uirevision=rev)
+    fig.update_yaxes(uirevision=rev)
     fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0),
-                      xaxis_rangeslider_visible=False, uirevision=f"{sym}-{tf}")
+                      xaxis_rangeslider_visible=False,
+                      uirevision=rev, transition=dict(duration=0))
 
-    stretch(st.plotly_chart, fig, config=dict(displaylogo=False), key=f"chart-{sym}-{tf}")
+    stretch(chart_box.plotly_chart, fig, config=dict(displaylogo=False, scrollZoom=True),
+            key=f"chart-{sym}-{tf}")
     st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
                            else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
     st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ "
                "อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
-    st.markdown("""<style>
-    [data-stale="true"], .stale-element, [data-testid="stElementContainer"][data-stale="true"]
-    {opacity:1 !important; transition:none !important;}
-    </style>""", unsafe_allow_html=True)
 
 
 live_view()
