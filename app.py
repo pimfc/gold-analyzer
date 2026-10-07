@@ -171,8 +171,8 @@ def add_ind(df, htf_rule=None, min_score=55, active=tuple(STRATS)):
     anys = np.zeros(len(df), bool)
     for k, (tb, ts) in trig.items():
         sb_, ss_ = ("sc_tb", "sc_ts") if KIND[k] == "trend" else ("sc_rb", "sc_rs")
-        buy = (tb & (df[sb_] >= min_score)).to_numpy(bool)
-        sell = (ts & (df[ss_] >= min_score)).to_numpy(bool)
+        buy = np.array(tb & (df[sb_] >= min_score), dtype=bool)
+        sell = np.array(ts & (df[ss_] >= min_score), dtype=bool)
         buy[-1] = sell[-1] = False                       # แท่งสุดท้ายยังไม่ปิด ไม่นับ
         df[f"{k}_buy"], df[f"{k}_sell"] = buy, sell
         if k in active:
