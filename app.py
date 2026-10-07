@@ -725,48 +725,54 @@ def live_view():
         st.caption("ค่าคาดหวัง R/ไม้ > 0 = ในข้อมูลช่วงสั้นที่โหลดมา กลยุทธ์นั้นเฉลี่ยกำไร (1R = เสี่ยงต่อไม้หนึ่งหน่วย) "
                    "จำลองเข้าที่ราคาปิดแท่งสัญญาณ ออกที่ SL/TP1 ยังไม่รวมสเปรด/สลิป จำนวนไม้น้อยอาจแกว่งมาก "
                    "ใช้เทียบกลยุทธ์กันเท่านั้น ผลในอดีตไม่รับประกันอนาคต อย่าปรับพารามิเตอร์จนผลย้อนหลังสวยเกินจริง")
-        sg = dd[dd.buy_sig | dd.sell_sig].tail(6).iloc[::-1]
+                sg = dd[dd.buy_sig | dd.sell_sig].tail(6).iloc[::-1]
         if len(sg):
             def names(row):
                 ks = [SHORT[k] for k in active if row[f"{k}_buy"] or row[f"{k}_sell"]]
                 return "+".join(ks)
-if ...: # หรือบล็อกคำสั่งก่อนหน้าของคุณ
-    # ย่อหน้าเข้ามา 4 ช่องให้ตรงกัน
-    stretch(
-        st.dataframe, 
-        pd.DataFrame({
-            "เวลา (ไทย)": [i.strftime("%d/%m %H:%M") for i in sg.index],
-            "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
-            "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
-            "คะแนน": [f"{(b if bs else s):.0f}" for b, s, bs in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
-            "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close]
-        }), 
-        key="tbl-sig"
-    )
-         
+
+            stretch(
+                st.dataframe,
+                pd.DataFrame({
+                    "เวลา (ไทย)": [i.strftime("%d/%m %H:%M") for i in sg.index],
+                    "ทิศ": ["BUY" if b else "SELL" for b in sg.buy_sig],
+                    "กลยุทธ์": [names(r_) for _, r_ in sg.iterrows()],
+                    "คะแนน": [f"{(b if bs_ else s):.0f}" for b, s, bs_ in zip(sg.buy_sc, sg.sell_sc, sg.buy_sig)],
+                    "ราคาปิดแท่งนั้น": [f"{x + o:.2f}" for x in sg.close],
+                }),
+                hide_index=True,
+                key="tbl-sig",
+            )
+        else:
+            st.write("ยังไม่มีสัญญาณในช่วงข้อมูลที่โหลด")
+
     # กราฟ (ตัด timezone ออกเพื่อให้ Plotly แสดงเวลาไทยตรงๆ)
     d = A["d"].tail(120).copy()
     d.index = d.index.tz_localize(None)
     x_end = d.index[-1] + P["step"] * 14
     fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o,
                                    name="ราคา", increasing_line_color="#1b7a62", decreasing_line_color="#b3372f"))
-    for col, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
-        fig.add_trace(go.Scatter(x=d.index, y=d[col] + o, name=nm, line=dict(width=1.2)))
+    for col_, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
+        fig.add_trace(go.Scatter(x=d.index, y=d[col_] + o, name=nm, line=dict(width=1.2)))
     if "reversal" in active:
-        for col in ("bb_u", "bb_l"):
-            fig.add_trace(go.Scatter(x=d.index, y=d[col] + o, name="Bollinger", legendgroup="bb",
-                                     showlegend=(col == "bb_u"), line=dict(width=1, dash="dot", color="#8a8a8a")))
+        for col_ in ("bb_u", "bb_l"):
+            fig.add_trace(go.Scatter(x=d.index, y=d[col_] + o, name="Bollinger", legendgroup="bb",
+                                     showlegend=(col_ == "bb_u"), line=dict(width=1, dash="dot", color="#8a8a8a")))
 
     # ลูกศรสัญญาณ: เขียวชี้ขึ้น = BUY (ใต้แท่ง), แดงชี้ลง = SELL (เหนือแท่ง)
-    bs, ss = d[d.buy_sig], d[d.sell_sig]
-    if len(bs):
-        fig.add_trace(go.Scatter(x=bs.index, y=bs.low + o - 0.5 * bs.atr, mode="markers", name="สัญญาณ BUY",
-                                 marker=dict(symbol="triangle-up", size=17, color="#00b050", line=dict(width=1, color="#005a28")),
-                                 text=[f"{x:.0f}" for x in bs.buy_sc], hovertemplate="BUY คะแนน %{text}<extra></extra>"))
-    if len(ss):
-        fig.add_trace(go.Scatter(x=ss.index, y=ss.high + o + 0.5 * ss.atr, mode="markers", name="สัญญาณ SELL",
-                                 marker=dict(symbol="triangle-down", size=17, color="#e02020", line=dict(width=1, color="#7a0000")),
-                                 text=[f"{x:.0f}" for x in ss.sell_sc], hovertemplate="SELL คะแนน %{text}<extra></extra>"))
+    bsig, ssig = d[d.buy_sig], d[d.sell_sig]
+    if len(bsig):
+        fig.add_trace(go.Scatter(x=bsig.index, y=bsig.low + o - 0.5 * bsig.atr, mode="markers", name="สัญญาณ BUY",
+                                 marker=dict(symbol="triangle-up", size=17, color="#00b050",
+                                             line=dict(width=1, color="#005a28")),
+                                 text=[f"{x:.0f}" for x in bsig.buy_sc],
+                                 hovertemplate="BUY คะแนน %{text}<extra></extra>"))
+    if len(ssig):
+        fig.add_trace(go.Scatter(x=ssig.index, y=ssig.high + o + 0.5 * ssig.atr, mode="markers", name="สัญญาณ SELL",
+                                 marker=dict(symbol="triangle-down", size=17, color="#e02020",
+                                             line=dict(width=1, color="#7a0000")),
+                                 text=[f"{x:.0f}" for x in ssig.sell_sc],
+                                 hovertemplate="SELL คะแนน %{text}<extra></extra>"))
 
     # กรอบโซนเข้า + แถบเป้ากำไร + เส้น SL/TP
     if p:
@@ -775,7 +781,6 @@ if ...: # หรือบล็อกคำสั่งก่อนหน้า�
         tint = "rgba(0,176,80,0.08)" if buy else "rgba(224,32,32,0.08)"
         lo, hi = zlo, zhi
         x0 = d.index[-45]
-        # เส้นราคาปัจจุบัน (วิ่งตามทิกสด) ให้เห็นชัดว่าห่างโซนแค่ไหน
         fig.add_shape(type="line", x0=x0, x1=x_end, y0=A["price"] + o, y1=A["price"] + o,
                       line=dict(color="#1f6feb", width=1.5))
         fig.add_annotation(x=d.index[0], y=A["price"] + o, xanchor="left", yanchor="bottom", showarrow=False,
@@ -784,28 +789,29 @@ if ...: # หรือบล็อกคำสั่งก่อนหน้า�
                       fillcolor=tint, line=dict(width=0), layer="below")
         fig.add_shape(type="rect", x0=x0, x1=x_end, y0=lo + o, y1=hi + o, fillcolor=fill,
                       line=dict(color=col, width=2.5, dash="solid" if A["status"] == "now" else "dash"))
-        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False, font=dict(color=col, size=15),
+        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False,
+                           font=dict(color=col, size=15),
                            text=f"<b>โซนเข้า {'BUY' if buy else 'SELL'}</b> {lo + o:.2f}-{hi + o:.2f}",
                            bgcolor="rgba(255,255,255,0.92)", bordercolor=col, borderwidth=2)
         for y, nm, c2_ in ((p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f"), (p["tp2"], "TP2", "#a87a1f")):
-            fig.add_shape(type="line", x0=x0, x1=x_end, y0=y + o, y1=y + o, line=dict(color=c2_, width=1.5, dash="dot"))
+            fig.add_shape(type="line", x0=x0, x1=x_end, y0=y + o, y1=y + o,
+                          line=dict(color=c2_, width=1.5, dash="dot"))
             fig.add_annotation(x=x_end, y=y + o, xanchor="right", yanchor="bottom", showarrow=False,
                                text=f"{nm} {y + o:.1f}", font=dict(color=c2_, size=12))
+
     fig.update_xaxes(range=[d.index[0], x_end])
-    # uirevision: ซูม/เลื่อนกราฟแล้วไม่ถูกรีเซ็ตทุกครั้งที่รีเฟรช
-    fig.update_layout(
-        height=470, 
-        margin=dict(l=0, r=0, t=10, b=0), 
-        xaxis_rangeslider_visible=False
-    )
+    fig.update_layout(height=470, margin=dict(l=0, r=0, t=10, b=0),
+                      xaxis_rangeslider_visible=False, uirevision=f"{sym}-{tf}")
 
     stretch(st.plotly_chart, fig, config=dict(displaylogo=False), key=f"chart-{sym}-{tf}")
     st.caption(src_note + (f" | 🟢 ทิกสด WebSocket (ล่าสุด {live_age:.0f} วินาทีที่แล้ว)" if live_age is not None
                            else " | 🟡 ยังไม่มีทิกสด ใช้ข้อมูลที่ดึงเป็นรอบ (ตลาดอาจปิด หรือ WebSocket ยังเชื่อมไม่ติด)"))
-    st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
+    st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ "
+               "อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
     st.markdown("""<style>
     [data-stale="true"], .stale-element, [data-testid="stElementContainer"][data-stale="true"]
     {opacity:1 !important; transition:none !important;}
     </style>""", unsafe_allow_html=True)
+
 
 live_view()
