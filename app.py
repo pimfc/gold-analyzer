@@ -4,13 +4,14 @@ Gold Analyzer - แอปวิเคราะห์ราคาทอง XAUUSD
 รันด้วย: streamlit run app.py   (หรือดับเบิลคลิก run.bat)
 """
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import yfinance as yf
-from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Gold Analyzer", page_icon="🪙", layout="centered")
 
@@ -38,17 +39,56 @@ min_lot = sb.number_input("lot ขั้นต่ำ", value=0.01, step=0.01, fo
 sb.subheader("แจ้งเตือน Telegram (ไม่บังคับ)")
 tg_token = sb.text_input("Bot token", type="password")
 tg_chat = sb.text_input("Chat ID")
+sb.subheader("แหล่งราคาสำรอง (ไม่บังคับ)")
+try:
+    _sec = st.secrets.get("TWELVE_KEY", "")
+except Exception:
+    _sec = ""
+td_key = sb.text_input("Twelve Data API key", value=_sec, type="password",
+                       help="สมัครฟรีที่ twelvedata.com ใช้เมื่อ Yahoo ไม่ส่งข้อมูล (เซิร์ฟเวอร์คลาวด์มักถูก Yahoo จำกัด)")
 
+speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [5, 10, 30, 60], index=1,
+                     help="ยิ่งถี่ยิ่งเสี่ยงโดน Yahoo จำกัดการเข้าถึง ถ้าข้อมูลหาย ให้เพิ่มเป็น 10-30 วินาที")
 P = PROFILES[tf]
-st_autorefresh(interval=P["refresh"] * 1000, key="auto")
 
 
 # ---------------- Data & indicators ----------------
-@st.cache_data(ttl=15, show_spinner=False)
-def load(symbol, interval, period):
-    df = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
-    df = df.rename(columns=str.lower)[["open", "high", "low", "close"]].dropna()
-    return df
+TD_INTERVAL = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
+
+
+def _clean(df):
+    df = df.rename(columns=str.lower)[["open", "high", "low", "close"]].astype(float).dropna()
+    return df[~df.index.duplicated()].sort_index()
+
+
+@st.cache_data(ttl=4, show_spinner=False)
+def load(symbol, interval, period, td_key):
+    """คืน (df, ข้อความอธิบาย) ลอง Yahoo ทั้งสองสัญลักษณ์ก่อน แล้วค่อย Twelve Data"""
+    notes = []
+    for sym in dict.fromkeys([symbol, "GC=F", "XAUUSD=X"]):
+        try:
+            df = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=False)
+            if df is not None and len(df) >= 260:
+                return _clean(df), (f"ใช้ข้อมูล Yahoo ({sym})" + ("" if sym == symbol else " แทนแหล่งที่เลือก"))
+            notes.append(f"Yahoo {sym}: ได้ {0 if df is None else len(df)} แท่ง")
+        except Exception as e:
+            notes.append(f"Yahoo {sym}: {type(e).__name__}")
+    if td_key:
+        try:
+            r = requests.get("https://api.twelvedata.com/time_series", timeout=15, params=dict(
+                symbol="XAU/USD", interval=TD_INTERVAL[interval], outputsize=600, timezone="UTC", apikey=td_key)).json()
+            if "values" in r:
+                df = pd.DataFrame(r["values"])
+                df.index = pd.to_datetime(df.pop("datetime"))
+                df = _clean(df)
+                if len(df) >= 260:
+                    return df, "ใช้ข้อมูล Twelve Data (XAU/USD)"
+                notes.append(f"Twelve Data: ได้ {len(df)} แท่ง")
+            else:
+                notes.append(f"Twelve Data: {r.get('message', 'ไม่มีข้อมูล')}")
+        except Exception as e:
+            notes.append(f"Twelve Data: {type(e).__name__}")
+    return None, " | ".join(notes)
 
 
 def add_ind(df):
@@ -158,67 +198,78 @@ def send_tg(msg):
 st.title("🪙 Gold Analyzer")
 st.caption("วิเคราะห์ XAUUSD อัตโนมัติจากราคาล่าสุด ไม่ใช่การรับประกันผล ตรวจกราฟจริงและตั้ง SL ทุกไม้")
 
-try:
-    df = load(SYMBOLS[sym_label], P["interval"], P["period"])
-    if len(df) < 260:
-        st.error("ข้อมูลราคาไม่พอ ลองเปลี่ยน Timeframe หรือแหล่งราคา")
-        st.stop()
-    A = analyse(df)
-except Exception as e:
-    st.error(f"ดึงราคาไม่สำเร็จ: {e}")
-    st.stop()
+@st.fragment(run_every=speed)
+def live_view():
+    df, src_note = load(SYMBOLS[sym_label], P["interval"], P["period"], td_key)
+    if df is None:
+        st.error("ดึงข้อมูลราคาไม่ได้ในตอนนี้")
+        st.code(src_note or "ไม่มีรายละเอียด")
+        st.info("ถ้าเห็นว่า Yahoo ได้ 0 แท่งทุกตัว แปลว่า Yahoo ปิดกั้นเซิร์ฟเวอร์คลาวด์ ให้ใส่ Twelve Data API key (ฟรี) "
+                "ที่แถบข้างซ้ายหัวข้อ 'แหล่งราคาสำรอง' หรือรอสักครู่แล้วลองใหม่")
+        return
+    try:
+        A = analyse(df)
+    except Exception as e:
+        st.error(f"วิเคราะห์ข้อมูลไม่สำเร็จ: {e}")
+        return
 
-o = offset
-c1, c2, c3 = st.columns(3)
-c1.metric("ราคาล่าสุด", f"{A['price'] + o:.2f}")
-c2.metric("ATR (ความผันผวน)", f"{A['atr']:.2f}")
-c3.metric("อัปเดตล่าสุด", time.strftime("%H:%M:%S"))
+    o = offset
+    c1, c2, c3 = st.columns(3)
+    prev = st.session_state.get("prev_price")
+    c1.metric("ราคาล่าสุด", f"{A['price'] + o:.2f}", None if prev is None else f"{A['price'] - prev:+.2f}")
+    st.session_state["prev_price"] = A["price"]
+    c2.metric("ATR (ความผันผวน)", f"{A['atr']:.2f}")
+    c3.metric("อัปเดตล่าสุด", datetime.now(ZoneInfo("Asia/Bangkok")).strftime("%H:%M:%S"))
 
-label = {"up": "ขาขึ้น 📈", "down": "ขาลง 📉", "side": "ไซด์เวย์ / ไม่ชัด ➖"}[A["bias"]]
-st.subheader(f"แนวโน้ม {tf}: {label}")
+    label = {"up": "ขาขึ้น 📈", "down": "ขาลง 📉", "side": "ไซด์เวย์ / ไม่ชัด ➖"}[A["bias"]]
+    st.subheader(f"แนวโน้ม {tf}: {label}")
 
-p = A["plan"]
-if A["status"] == "now":
-    st.success(f"✅ สัญญาณเข้า {p['side'].upper()} ตอนนี้ (แท่งล่าสุดปิดครบเงื่อนไข)")
-elif A["status"] == "wait":
-    st.info(f"⏳ แนวโน้มชัด แต่ยังไม่ถึงจุดเข้า รอราคา{'ย่อลง' if p['side']=='buy' else 'เด้งขึ้น'}มาที่โซนด้านล่าง")
-else:
-    st.warning("⛔ ยังไม่ควรเข้าไม้ แนวโน้มไม่ชัด รอให้เทรนด์ชัดก่อน")
+    p = A["plan"]
+    if A["status"] == "now":
+        st.success(f"✅ สัญญาณเข้า {p['side'].upper()} ตอนนี้ (แท่งล่าสุดปิดครบเงื่อนไข)")
+    elif A["status"] == "wait":
+        st.info(f"⏳ แนวโน้มชัด แต่ยังไม่ถึงจุดเข้า รอราคา{'ย่อลง' if p['side']=='buy' else 'เด้งขึ้น'}มาที่โซนด้านล่าง")
+    else:
+        st.warning("⛔ ยังไม่ควรเข้าไม้ แนวโน้มไม่ชัด รอให้เทรนด์ชัดก่อน")
 
-if p:
-    lot, lot_note = lot_for(p["sl_dist"])
-    t = pd.DataFrame({
-        "รายการ": ["ทิศทาง", "โซนเข้า", "Stop loss", "TP1", "TP2", "RR ถึง TP1", "ระยะ SL", "lot ที่แนะนำ"],
-        "ค่า": [p["side"].upper(),
-                f"{p['lo'] + o:.2f}" if p["lo"] == p["hi"] else f"{p['lo'] + o:.2f} - {p['hi'] + o:.2f}",
-                f"{p['sl'] + o:.2f}", f"{p['tp1'] + o:.2f}", f"{p['tp2'] + o:.2f}",
-                f"1 : {p['rr']:.1f}", f"{p['sl_dist']:.2f} ดอลลาร์",
-                f"{lot:.2f}  ({lot_note})" if lot else "ไม่เปิด: " + lot_note],
-    })
-    st.dataframe(t, hide_index=True, use_container_width=True)
-    for w in A["warns"]:
-        st.warning(w)
+    if p:
+        lot, lot_note = lot_for(p["sl_dist"])
+        t = pd.DataFrame({
+            "รายการ": ["ทิศทาง", "โซนเข้า", "Stop loss", "TP1", "TP2", "RR ถึง TP1", "ระยะ SL", "lot ที่แนะนำ"],
+            "ค่า": [p["side"].upper(),
+                    f"{p['lo'] + o:.2f}" if p["lo"] == p["hi"] else f"{p['lo'] + o:.2f} - {p['hi'] + o:.2f}",
+                    f"{p['sl'] + o:.2f}", f"{p['tp1'] + o:.2f}", f"{p['tp2'] + o:.2f}",
+                    f"1 : {p['rr']:.1f}", f"{p['sl_dist']:.2f} ดอลลาร์",
+                    f"{lot:.2f}  ({lot_note})" if lot else "ไม่เปิด: " + lot_note],
+        })
+        st.dataframe(t, hide_index=True, use_container_width=True)
+        for w in A["warns"]:
+            st.warning(w)
 
-    if A["status"] == "now" and st.session_state.get("last_alert") != str(A["bar"]):
-        st.session_state["last_alert"] = str(A["bar"])
-        send_tg(f"สัญญาณ {p['side'].upper()} XAUUSD {tf}\nเข้า ~{p['mid'] + o:.2f}\nSL {p['sl'] + o:.2f}\n"
-                f"TP1 {p['tp1'] + o:.2f} | TP2 {p['tp2'] + o:.2f}\nlot {lot:.2f}")
+        if A["status"] == "now" and st.session_state.get("last_alert") != str(A["bar"]):
+            st.session_state["last_alert"] = str(A["bar"])
+            send_tg(f"สัญญาณ {p['side'].upper()} XAUUSD {tf}\nเข้า ~{p['mid'] + o:.2f}\nSL {p['sl'] + o:.2f}\n"
+                    f"TP1 {p['tp1'] + o:.2f} | TP2 {p['tp2'] + o:.2f}\nlot {lot:.2f}")
 
-with st.expander("เงื่อนไขที่ใช้ตัดสิน", expanded=False):
-    for k, v in A["checks"].items():
-        st.write(("✅ " if v else "❌ ") + k)
-    st.write(f"แนวรับใกล้สุด: {A['sup'] + o:.2f}" if A["sup"] else "แนวรับใกล้สุด: -")
-    st.write(f"แนวต้านใกล้สุด: {A['res'] + o:.2f}" if A["res"] else "แนวต้านใกล้สุด: -")
+    with st.expander("เงื่อนไขที่ใช้ตัดสิน", expanded=False):
+        for k, v in A["checks"].items():
+            st.write(("✅ " if v else "❌ ") + k)
+        st.write(f"แนวรับใกล้สุด: {A['sup'] + o:.2f}" if A["sup"] else "แนวรับใกล้สุด: -")
+        st.write(f"แนวต้านใกล้สุด: {A['res'] + o:.2f}" if A["res"] else "แนวต้านใกล้สุด: -")
 
-# กราฟ
-d = A["d"].tail(120)
-fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o, name="ราคา"))
-for col, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
-    fig.add_trace(go.Scatter(x=d.index, y=d[col] + o, name=nm, line=dict(width=1.2)))
-if p:
-    for y, nm, colr in ((p["lo"], "เข้า", "#1b7a62"), (p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f")):
-        fig.add_hline(y=y + o, line_dash="dot", line_color=colr, annotation_text=nm)
-fig.update_layout(height=430, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
-                  legend=dict(orientation="h", y=1.08))
-st.plotly_chart(fig, use_container_width=True)
-st.caption(f"หน้านี้รีเฟรชอัตโนมัติทุก {P['refresh']} วินาที | ราคาจาก Yahoo Finance อาจดีเลย์และไม่เท่าโบรกเกอร์ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
+    # กราฟ
+    d = A["d"].tail(120)
+    fig = go.Figure(go.Candlestick(x=d.index, open=d.open + o, high=d.high + o, low=d.low + o, close=d.close + o, name="ราคา"))
+    for col, nm in (("ema_t", "EMA200"), ("ema_s", "EMA50"), ("ema_f", "EMA21")):
+        fig.add_trace(go.Scatter(x=d.index, y=d[col] + o, name=nm, line=dict(width=1.2)))
+    if p:
+        for y, nm, colr in ((p["lo"], "เข้า", "#1b7a62"), (p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f")):
+            fig.add_hline(y=y + o, line_dash="dot", line_color=colr, annotation_text=nm)
+    fig.update_layout(height=430, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False,
+                      legend=dict(orientation="h", y=1.08))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(src_note)
+    st.caption(f"กราฟอัปเดตอัตโนมัติทุก {speed} วินาที | ราคาจาก Yahoo Finance ไม่ใช่ทิกสดของโบรกเกอร์ อาจช้ากว่าและกระโดดเป็นช่วงๆ ใช้ช่องส่วนต่างราคาปรับให้ตรง")
+
+
+live_view()
