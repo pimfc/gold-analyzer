@@ -232,8 +232,10 @@ td_key = sb.text_input("Twelve Data API key", value=_secret("TWELVE_KEY"), type=
                        help="สมัครฟรีที่ twelvedata.com ใช้เมื่อ Yahoo ไม่ส่งข้อมูล (เซิร์ฟเวอร์คลาวด์มักถูก Yahoo จำกัด) "
                             "โควตาฟรีจำกัด แอปจึงดึงจากแหล่งนี้ไม่เกินทุก ~2 นาที")
 
-speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [1, 2, 5, 10, 30, 60], index=0,
-                     help="ราคาล่าสุดมาจากทิกสด (WebSocket) จึงอัปเดตทุก 1 วินาทีได้ ส่วนข้อมูลแท่งเทียนย้อนหลังดึงใหม่ทุก ~5 วินาที")
+speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60], index=1,
+                     help="เร็วสุดที่ Streamlit วาดกราฟทั้งใบใหม่ได้จริงคือราว 0.1 วินาที (0.01 วินาที = 100 ครั้ง/วินาที ทำไม่ได้ "
+                          "และ Yahoo ส่งทิกมาราว 1 ครั้ง/วินาที จึงไม่มีราคาใหม่ให้วาดถี่ขนาดนั้น) "
+                          "ถ้าเครื่องหรือเน็ตช้าให้เลือก 0.5-1 วินาที ข้อมูลแท่งเทียนย้อนหลังดึงใหม่ทุก ~5 วินาที")
 P = dict(PROFILES[tf], step=STEPS[PROFILES[tf]["interval"]])
 
 
@@ -429,10 +431,46 @@ def live_view():
     st.subheader(f"แนวโน้ม {tf}: {label}")
 
     p = A["plan"]
-    if A["status"] == "now":
-        st.success(f"✅ สัญญาณเข้า {p['side'].upper()} ตอนนี้ (แท่งล่าสุดปิดครบเงื่อนไข)")
-    elif A["status"] == "wait":
-        st.info(f"⏳ แนวโน้มชัด แต่ยังไม่ถึงจุดเข้า รอราคา{'ย่อลง' if p['side']=='buy' else 'เด้งขึ้น'}มาที่โซนด้านล่าง")
+    zlo = zhi = None
+    if p:
+        zlo, zhi = p["lo"], p["hi"]
+        if zhi - zlo < 0.3 * A["atr"]:                     # โซนบางเกินไปให้ขยายให้มองเห็น
+            m = (zlo + zhi) / 2
+            zlo, zhi = m - 0.15 * A["atr"], m + 0.15 * A["atr"]
+        zlo, zhi = float(zlo), float(zhi)
+
+    if p:
+        buy_ = p["side"] == "buy"
+        px = A["price"]
+        in_zone = zlo <= px <= zhi
+        if in_zone:
+            state_txt = "🎯 ราคาอยู่ในโซนเข้าแล้ว" if A["status"] == "now" else "🎯 ราคาแตะโซนแล้ว (รอแท่งปิดยืนยันสัญญาณ)"
+        elif px > zhi:
+            gap = px - zhi
+            state_txt = (f"⏳ รอราคา<b>ลง</b>อีก {gap:.2f} ดอลลาร์ ถึงจะเข้าโซน" if buy_
+                         else f"⚠️ ราคาอยู่<b>เหนือ</b>โซน SELL {gap:.2f} ดอลลาร์ (เลยโซนไปแล้ว อย่าไล่เข้า)")
+        else:
+            gap = zlo - px
+            state_txt = (f"⚠️ ราคาอยู่<b>ใต้</b>โซน BUY {gap:.2f} ดอลลาร์ (เลยโซนไปแล้ว อย่าไล่เข้า)" if buy_
+                         else f"⏳ รอราคา<b>ขึ้น</b>อีก {gap:.2f} ดอลลาร์ ถึงจะเข้าโซน")
+        color = "#00b050" if buy_ else "#e02020"
+        head = {"now": f"✅ สัญญาณเข้า {p['side'].upper()} ตอนนี้",
+                "wait": f"โซนรอเข้า {p['side'].upper()}"}[A["status"]]
+        st.markdown(
+            f"""<div style="border:3px solid {color};border-radius:12px;padding:14px 18px;margin:6px 0 12px 0;
+            background:{color}18;">
+            <div style="font-size:1.05rem;font-weight:700;color:{color};">{head}</div>
+            <div style="font-size:2.1rem;font-weight:800;line-height:1.25;">
+            {'🟢 BUY' if buy_ else '🔴 SELL'} โซนเข้า {zlo + o:.2f} – {zhi + o:.2f}</div>
+            <div style="font-size:1.05rem;margin:4px 0 8px 0;">{state_txt}</div>
+            <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:1rem;">
+            <span>🛑 SL <b>{p['sl'] + o:.2f}</b></span>
+            <span>🎯 TP1 <b>{p['tp1'] + o:.2f}</b></span>
+            <span>🎯 TP2 <b>{p['tp2'] + o:.2f}</b></span>
+            <span>RR <b>1 : {p['rr']:.1f}</b></span></div>
+            <div style="font-size:0.85rem;opacity:0.75;margin-top:6px;">
+            ขาเข้าจริงให้รอให้ราคาเข้ากรอบโซนก่อน แล้วค่อยตั้ง SL ตามด้านบน</div>
+            </div>""", unsafe_allow_html=True)
     else:
         st.warning("⛔ ยังไม่ควรเข้าไม้ แนวโน้มไม่ชัด รอให้เทรนด์ชัดก่อน")
 
@@ -441,7 +479,7 @@ def live_view():
         t = pd.DataFrame({
             "รายการ": ["ทิศทาง", "โซนเข้า", "Stop loss", "TP1", "TP2", "RR ถึง TP1", "ระยะ SL", "lot ที่แนะนำ"],
             "ค่า": [p["side"].upper(),
-                    f"{p['lo'] + o:.2f}" if p["lo"] == p["hi"] else f"{p['lo'] + o:.2f} - {p['hi'] + o:.2f}",
+                    f"{zlo + o:.2f} - {zhi + o:.2f}",
                     f"{p['sl'] + o:.2f}", f"{p['tp1'] + o:.2f}", f"{p['tp2'] + o:.2f}",
                     f"1 : {p['rr']:.1f}", f"{p['sl_dist']:.2f} ดอลลาร์",
                     f"{lot:.2f}  ({lot_note})" if lot else "ไม่เปิด: " + lot_note],
@@ -509,17 +547,20 @@ def live_view():
         buy = p["side"] == "buy"
         col, fill = ("#00b050", "rgba(0,176,80,0.30)") if buy else ("#e02020", "rgba(224,32,32,0.30)")
         tint = "rgba(0,176,80,0.08)" if buy else "rgba(224,32,32,0.08)"
-        lo, hi = p["lo"], p["hi"]
-        if hi - lo < 0.3 * A["atr"]:                       # โซนบางเกินไปให้ขยายให้มองเห็น
-            m = (lo + hi) / 2
-            lo, hi = m - 0.15 * A["atr"], m + 0.15 * A["atr"]
+        lo, hi = zlo, zhi
         x0 = d.index[-45]
+        # เส้นราคาปัจจุบัน (วิ่งตามทิกสด) ให้เห็นชัดว่าห่างโซนแค่ไหน
+        fig.add_shape(type="line", x0=x0, x1=x_end, y0=A["price"] + o, y1=A["price"] + o,
+                      line=dict(color="#1f6feb", width=1.5))
+        fig.add_annotation(x=d.index[0], y=A["price"] + o, xanchor="left", yanchor="bottom", showarrow=False,
+                           text=f"ราคา {A['price'] + o:.2f}", font=dict(color="#1f6feb", size=12))
         fig.add_shape(type="rect", x0=x0, x1=x_end, y0=min(p["mid"], p["tp1"]) + o, y1=max(p["mid"], p["tp1"]) + o,
                       fillcolor=tint, line=dict(width=0), layer="below")
         fig.add_shape(type="rect", x0=x0, x1=x_end, y0=lo + o, y1=hi + o, fillcolor=fill,
                       line=dict(color=col, width=2.5, dash="solid" if A["status"] == "now" else "dash"))
-        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False, font=dict(color=col, size=13),
-                           text=f"<b>โซน {'BUY' if buy else 'SELL'}</b> {lo + o:.1f}-{hi + o:.1f}", bgcolor="rgba(255,255,255,0.85)")
+        fig.add_annotation(x=x_end, y=(lo + hi) / 2 + o, xanchor="right", showarrow=False, font=dict(color=col, size=15),
+                           text=f"<b>โซนเข้า {'BUY' if buy else 'SELL'}</b> {lo + o:.2f}-{hi + o:.2f}",
+                           bgcolor="rgba(255,255,255,0.92)", bordercolor=col, borderwidth=2)
         for y, nm, c2_ in ((p["sl"], "SL", "#b3372f"), (p["tp1"], "TP1", "#a87a1f"), (p["tp2"], "TP2", "#a87a1f")):
             fig.add_shape(type="line", x0=x0, x1=x_end, y0=y + o, y1=y + o, line=dict(color=c2_, width=1.5, dash="dot"))
             fig.add_annotation(x=x_end, y=y + o, xanchor="right", yanchor="bottom", showarrow=False,
