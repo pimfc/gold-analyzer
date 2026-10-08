@@ -1,6 +1,8 @@
 """
-Gold Analyzer v5 - วิเคราะห์ทอง XAUUSD (ไม่ต้องใช้ MT5)
+Gold Analyzer v6 - วิเคราะห์ทอง XAUUSD (ไม่ต้องใช้ MT5)
 v3: รวมเทคนิคเป็นระบบเดียว แบ่งเป็นชั้น (ภาวะตลาด ADX / ทิศทาง / โครงสร้าง / แรงส่ง / จุดเข้า / ยืนยัน)
+v6 เพิ่ม: ให้ AI หลายตัว (Claude / GPT / Gemini) ช่วยวิเคราะห์อิสระต่อกัน แล้วสรุปความเห็นตรงกัน/ไม่ตรงกัน
+  พร้อมกระดานคะแนนจริงของแต่ละ AI (ติดตามผลว่าแต่ละคำแนะนำชนะหรือแพ้ในเวลาถือไม้)
 v5 เพิ่ม: เกณฑ์ความน่าเชื่อถือจากผลย้อนหลัง (แยกช่วงทดสอบล่าสุด 30%), โหมดเรียลไทม์ไม่รอแท่งปิด,
   กรองข้อมูลเสีย/ทิกผิดปกติ, WebSocket ต่อใหม่อัตโนมัติ, กันแจ้งเตือนซ้ำ
 v4 เพิ่ม:
@@ -11,6 +13,9 @@ v4 เพิ่ม:
 """
 import time
 import threading
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import requests
@@ -511,6 +516,150 @@ def backtest(d, prof, cost=0.0):
         ev.append((i, best[1], sl_m, tp_m))
     out["all"] = _split(d, ev, max_bars, cost, cut)
     return out
+
+# ------------------------- AI หลายตัว (ฟังก์ชันล้วน) -------------------------
+AI_SYS = """คุณเป็นนักวิเคราะห์เทคนิคอลทองคำ XAUUSD ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่นและไม่มี markdown
+รูปแบบ: {"action":"buy|sell|wait","confidence":0-100,"entry_low":number|null,"entry_high":number|null,"stop_loss":number|null,"take_profit":number|null,"reasons":["เหตุผลสั้นๆ ภาษาไทย"],"invalid_if":"เมื่อไหร่ความเห็นนี้ใช้ไม่ได้แล้ว"}
+กฎ:
+- ใช้เฉพาะข้อมูลที่ให้มา ห้ามอ้างข่าวหรือข้อมูลภายนอก ห้ามเดาตัวเลขที่ไม่เห็น
+- ถ้าสัญญาณไม่ชัด ตลาดไซด์เวย์กลางกรอบ หรือสเปรดกินเกิน 25% ของระยะ SL ให้ action=wait (การรอเป็นคำตอบที่ถูกต้องได้)
+- buy: stop_loss < ราคาเข้า < take_profit / sell: take_profit < ราคาเข้า < stop_loss
+- ระยะ SL ไม่เล็กกว่า 0.8 เท่าของ ATR และ RR อย่างน้อย 1.2
+- confidence คือความมั่นใจในการอ่านโครงสร้างราคา ไม่ใช่ความน่าจะเป็นที่จะชนะ จงสะท้อนความไม่แน่นอนตามจริง"""
+
+
+def build_snapshot(A, P, spread, hold_key):
+    """สรุปตลาดเป็นข้อความกะทัดรัดส่งให้ AI (ไม่ใส่คำตอบของระบบกติกา เพื่อให้ AI คิดอิสระ ไม่ถูกชี้นำ)"""
+    d = A["d"]
+    b1 = d.iloc[-2]
+    now = pd.Timestamp.now(tz=TZ)
+    htf = "ไม่มีข้อมูล" if not bool(b1.htf_ok) else ("ขึ้น" if bool(b1.htf_up) else "ลง" if bool(b1.htf_dn) else "ไซด์เวย์")
+    head = [
+        f"สินค้า XAUUSD | กราฟ {P['tf']} | สไตล์: {hold_key} ({P['hold']}) | เวลาไทยตอนนี้ {now.strftime('%d/%m %H:%M')}",
+        f"ราคาล่าสุด {A['price']:.2f} | ATR14 {A['atr']:.2f} | สเปรด ${spread:.2f} (เท่ากับ {100 * spread / max(A['atr'], 1e-9):.0f}% ของ ATR)",
+        f"EMA21 {b1.ema_f:.2f} | EMA50 {b1.ema_s:.2f} | EMA200 {b1.ema_t:.2f} | RSI14 {b1.rsi:.0f} | ADX {b1.adx:.0f} (+DI {b1.pdi:.0f} / -DI {b1.mdi:.0f})",
+        f"MACD histogram {b1.macd_h:+.3f} | Bollinger20 บน {b1.bb_u:.2f} ล่าง {b1.bb_l:.2f} | เทรนด์ TF ใหญ่ ({P['htf']}): {htf}",
+        f"แนวรับใกล้สุด {A['sup']:.2f}" if A.get("sup") else "แนวรับใกล้สุด: ไม่มีข้อมูล",
+        f"แนวต้านใกล้สุด {A['res']:.2f}" if A.get("res") else "แนวต้านใกล้สุด: ไม่มีข้อมูล",
+        f"ถือไม้ไม่เกิน {P['max_bars']} แท่ง (ครบแล้วปิดที่ราคาตลาด)",
+        "แท่งเทียนล่าสุด 60 แท่ง (เวลา O H L C) แท่งสุดท้ายยังไม่ปิด:",
+    ]
+    t = d.tail(60)
+    rows = [f"{i.strftime('%d/%m %H:%M')} {o:.2f} {h:.2f} {l:.2f} {c:.2f}"
+            for i, o, h, l, c in zip(t.index, t.open, t.high, t.low, t.close)]
+    return "\n".join(head + rows)
+
+
+def parse_ai(txt, px, atr):
+    """แปลงคำตอบ AI เป็นข้อมูลที่ตรวจแล้ว ถ้าตัวเลขขัดกันเอง/แปลกผิดปกติ นับเป็นรอ"""
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        raise ValueError("ไม่พบ JSON ในคำตอบ")
+    j = json.loads(m.group(0))
+    act = str(j.get("action", "wait")).lower().strip()
+    act = act if act in ("buy", "sell", "wait") else "wait"
+
+    def num(x):
+        try:
+            v = float(x)
+            return v if np.isfinite(v) else None
+        except Exception:
+            return None
+
+    el, eh, sl, tp = (num(j.get(k)) for k in ("entry_low", "entry_high", "stop_loss", "take_profit"))
+    conf = int(max(0, min(100, num(j.get("confidence")) or 0)))
+    note = ""
+    if act in ("buy", "sell"):
+        sgn = 1 if act == "buy" else -1
+        ok = sl is not None and tp is not None
+        if ok:
+            ok = (sgn * (tp - px) > 0 and sgn * (px - sl) > 0 and 0.5 * atr <= abs(px - sl) <= 6 * atr
+                  and abs(tp - px) >= 0.5 * atr)
+        if not ok:
+            act, note = "wait", "ตัวเลข SL/TP ขัดกับทิศหรือกว้าง/แคบผิดปกติ จึงนับเป็นรอ"
+    reasons = [str(x)[:160] for x in (j.get("reasons") or [])][:4]
+    return dict(action=act, conf=conf, entry_low=el, entry_high=eh, sl=sl, tp=tp, reasons=reasons,
+                invalid_if=str(j.get("invalid_if", ""))[:200], note=note)
+
+
+def _http(url, headers, payload, key):
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200].replace(key, '***')}")
+    return r.json()
+
+
+def call_ai(provider, key, model, user_text):
+    """เรียก AI ผ่าน REST ตรงๆ คืนข้อความคำตอบ (ไม่ใส่ key ในข้อความ error)"""
+    if provider == "claude":
+        j = _http("https://api.anthropic.com/v1/messages",
+                  {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                  {"model": model, "max_tokens": 1500, "system": AI_SYS,
+                   "messages": [{"role": "user", "content": user_text}]}, key)
+        return "".join(b.get("text", "") for b in j.get("content", []))
+    if provider == "openai":
+        j = _http("https://api.openai.com/v1/chat/completions",
+                  {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                  {"model": model, "response_format": {"type": "json_object"},
+                   "messages": [{"role": "system", "content": AI_SYS}, {"role": "user", "content": user_text}]}, key)
+        return j["choices"][0]["message"]["content"] or ""
+    if provider == "gemini":
+        j = _http(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                  {"x-goog-api-key": key, "Content-Type": "application/json"},
+                  {"systemInstruction": {"parts": [{"text": AI_SYS}]},
+                   "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+                   "generationConfig": {"responseMimeType": "application/json"}}, key)
+        return "".join(p_.get("text", "") for p_ in j["candidates"][0]["content"]["parts"])
+    raise ValueError("ไม่รู้จักผู้ให้บริการ")
+
+
+def consensus(results):
+    """results = {ชื่อ: parsed หรือ None} สรุปว่า AI เห็นตรงกันแค่ไหน และโซน/SL/TP กลางของฝั่งที่ชนะโหวต"""
+    got = {k: v for k, v in results.items() if v}
+    n = len(got)
+    if n == 0:
+        return None
+    cnt = {a: sum(1 for v in got.values() if v["action"] == a) for a in ("buy", "sell", "wait")}
+    top = max(cnt, key=cnt.get)
+    share = cnt[top] / n
+    tie = sorted(cnt.values())[-1] == sorted(cnt.values())[-2]
+    if tie or (n >= 2 and share < 0.6):
+        level, top = "mixed", ("wait" if cnt["wait"] >= max(cnt["buy"], cnt["sell"]) else top)
+    elif share == 1 and n >= 2:
+        level = "all"
+    elif n == 1:
+        level = "single"
+    else:
+        level = "most"
+    mid = None
+    if top in ("buy", "sell") and level != "mixed":
+        grp = [v for v in got.values() if v["action"] == top]
+        med = lambda xs: float(np.median([x for x in xs if x is not None])) if any(x is not None for x in xs) else None
+        mid = dict(sl=med([v["sl"] for v in grp]), tp=med([v["tp"] for v in grp]),
+                   lo=med([v["entry_low"] for v in grp]), hi=med([v["entry_high"] for v in grp]))
+    return dict(counts=cnt, top=top, level=level, n=n, mid=mid)
+
+
+def eval_call(hist, t0, side, entry, sl, tp, max_bars):
+    """ตรวจผลคำแนะนำย้อนหลัง: เข้าที่ราคาตอนขอ ดูแท่งหลังจากนั้นไม่เกิน max_bars แท่ง ชน SL/TP ก่อนอันไหน
+    ชนทั้งคู่ในแท่งเดียว = แพ้ ครบเวลา = ปิดที่ราคาปิดแท่งสุดท้าย คืน None ถ้าข้อมูลยังไม่พอ"""
+    fut = hist[hist.index > t0].head(max_bars)
+    sgn = 1 if side == "buy" else -1
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    for _, row in fut.iterrows():
+        hit_sl = row.low <= sl if sgn == 1 else row.high >= sl
+        hit_tp = row.high >= tp if sgn == 1 else row.low <= tp
+        if hit_sl:
+            return dict(result="loss", r=-1.0)
+        if hit_tp:
+            return dict(result="win", r=abs(tp - entry) / risk)
+    if len(fut) < max_bars:
+        return None
+    r = sgn * (float(fut["close"].iloc[-1]) - entry) / risk
+    return dict(result="win" if r > 0 else "loss", r=r, timeout=True)
+
 # ===================================================================================
 # <<< CORE END
 # ===================================================================================
@@ -587,6 +736,18 @@ gate = sb.checkbox("ซ่อนคำสั่งเข้าไม้ถ้า
 sb.subheader("แจ้งเตือน Telegram (ไม่บังคับ)")
 tg_token = sb.text_input("Bot token", value=_secret("TG_TOKEN"), type="password")
 tg_chat = sb.text_input("Chat ID", value=str(_secret("TG_CHAT")))
+AI_CFG = {}
+with sb.expander("🤖 AI หลายตัวช่วยวิเคราะห์"):
+    st.caption("ใช้ API key ของคุณเอง (คิดเงินตามการใช้งานของแต่ละเจ้า) ควรเก็บ key ไว้ใน Secrets ของ Streamlit "
+               "ชื่อ ANTHROPIC_KEY / OPENAI_KEY / GEMINI_KEY ถ้าใช้ Secrets ต้องตั้ง AI_PASSWORD ด้วย "
+               "ไม่งั้นคนที่มีลิงก์แอปจะใช้ key ของคุณได้ ชื่อโมเดลเปลี่ยนบ่อย ถ้าขึ้น 'model not found' ให้แก้ชื่อตามเอกสารของเจ้านั้น")
+    for pid, label, dmodel, secname in (("claude", "Claude (Anthropic)", "claude-sonnet-5-5", "ANTHROPIC_KEY"),
+                                        ("openai", "GPT (OpenAI)", "gpt-5.5", "OPENAI_KEY"),
+                                        ("gemini", "Gemini (Google)", "gemini-2.5-pro", "GEMINI_KEY")):
+        on = st.checkbox(f"ใช้ {label}", value=False, key=f"ai_on_{pid}")
+        typed = st.text_input(f"API key {label}", type="password", key=f"ai_key_{pid}")
+        model = st.text_input("ชื่อโมเดล", value=dmodel, key=f"ai_model_{pid}")
+        AI_CFG[pid] = dict(on=on, typed=typed.strip(), model=model.strip(), secname=secname, label=label)
 speed = sb.selectbox("ความเร็วอัปเดตกราฟ (วินาที)", [0.5, 1, 2, 5, 10, 30, 60], index=1,
                      help="Yahoo ส่งทิกราว 1 ครั้ง/วินาที เลือก 1-2 วินาทีก็พอ ถ้าเครื่องหรือเน็ตช้าให้เลือกมากกว่านี้")
 
@@ -806,6 +967,10 @@ def live_view():
     ci = -1 if intrabar else -2
     g = bt[p["strat"]]["grade"] if p and p["strat"] in bt else None
     blocked = bool(p) and status == "now" and gate and g != "pass"
+    st.session_state["snap"] = dict(
+        key=(sym, hold_key), text=build_snapshot(A, P, spread_usd, hold_key), px=px, atr=A["atr"],
+        step=P["step"], max_bars=P["max_bars"], bar=A["bar"], plan=p, status=status, blocked=blocked,
+        df=A["d"][["open", "high", "low", "close"]].tail(600), t=time.time())
     zlo = zhi = None
     if p:
         zlo, zhi = p["lo"], p["hi"]
@@ -1073,3 +1238,153 @@ def live_view():
 
 
 live_view()
+
+
+# ---------------- AI หลายตัว: แผงควบคุม ----------------
+@st.cache_resource
+def get_ai_log():
+    return []                       # บันทึกทุกคำแนะนำ เพื่อตรวจผลจริงภายหลัง (กระดานคะแนน)
+
+
+@st.cache_resource
+def get_ai_budget():
+    return {"day": None, "n": 0}
+
+
+ACT_TH = {"buy": "🟢 BUY", "sell": "🔴 SELL", "wait": "⏸ รอ"}
+
+
+def ai_panel():
+    st.divider()
+    st.subheader("🤖 ความเห็นจาก AI หลายตัว")
+    st.caption("แต่ละ AI ได้ข้อมูลตลาดชุดเดียวกัน (ไม่เห็นคำตอบของระบบกติกา จึงคิดอิสระ) แล้วเทียบกัน "
+               "AI เห็นตรงกัน ไม่ได้แปลว่าถูกต้อง โมเดลภาษาไม่ได้ถูกพิสูจน์ว่าทำนายตลาดได้ ให้ใช้เป็นความเห็นที่สอง "
+               "ดูกระดานคะแนนจริงของแต่ละตัวด้านล่างก่อนเชื่อ")
+    snap = st.session_state.get("snap")
+    active = {k: v for k, v in AI_CFG.items() if v["on"]}
+    plan = {}
+    for pid, c in active.items():
+        sec = _secret(c["secname"])
+        key, src = (c["typed"], "typed") if c["typed"] else ((sec, "secret") if sec else ("", None))
+        plan[pid] = dict(c, key=key, src=src)
+    if not active:
+        st.info("เปิดใช้ AI อย่างน้อย 1 ตัวที่แถบซ้าย หัวข้อ '🤖 AI หลายตัวช่วยวิเคราะห์' และใส่ API key")
+    missing = [c["label"] for c in plan.values() if not c["key"]]
+    if missing:
+        st.warning("ยังไม่มี API key ของ: " + ", ".join(missing))
+    uses_secret = any(c["src"] == "secret" for c in plan.values())
+    gate_ok = True
+    if uses_secret:
+        pw = _secret("AI_PASSWORD")
+        if not pw:
+            gate_ok = False
+            st.error("ตรวจพบการใช้ key จาก Secrets แต่ยังไม่ได้ตั้ง AI_PASSWORD ใน Secrets เพื่อกันคนอื่นใช้ key ของคุณ "
+                     "ตั้งรหัสก่อน หรือเปลี่ยนไปพิมพ์ key ที่แถบซ้ายแทน")
+        elif st.text_input("รหัสผ่านใช้งาน AI", type="password", key="ai_pw") != str(pw):
+            gate_ok = False
+            st.info("ใส่รหัสผ่านใช้งาน AI เพื่อเปิดปุ่มด้านล่าง")
+
+    can = bool(snap) and bool(active) and not missing and gate_ok
+    if st.button("ขอความเห็น AI ตอนนี้", disabled=not can, type="primary"):
+        budget, cap = get_ai_budget(), int(_secret("AI_DAILY_CAP", 60) or 60)
+        today = datetime.now(ZoneInfo(TZ)).date()
+        if budget["day"] != today:
+            budget.update(day=today, n=0)
+        need = sum(1 for c in plan.values() if c["src"] == "secret")
+        if budget["n"] + need > cap:
+            st.error(f"ครบโควตาวันนี้แล้ว ({cap} ครั้งต่อวัน สำหรับ key ใน Secrets)")
+        else:
+            budget["n"] += need
+            text, px, atr = snap["text"], snap["px"], snap["atr"]
+
+            def work(item):
+                pid, c = item
+                try:
+                    return pid, parse_ai(call_ai(pid, c["key"], c["model"], text), px, atr), None
+                except Exception as e:
+                    return pid, None, f"{type(e).__name__}: {str(e)[:220]}".replace(c["key"], "***")
+
+            with st.spinner("กำลังถาม AI ทุกตัวพร้อมกัน ใช้เวลาประมาณ 10-60 วินาที..."):
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    outs = list(ex.map(work, plan.items()))
+            res = {pid: (v, err) for pid, v, err in outs}
+            tnow = pd.Timestamp.now(tz=TZ)
+            log = get_ai_log()
+            for pid, (v, err) in res.items():
+                if v and v["action"] in ("buy", "sell"):
+                    log.append(dict(t=tnow, key=snap["key"], model=plan[pid]["label"], side=v["action"], entry=px,
+                                    sl=v["sl"], tp=v["tp"], max_bars=snap["max_bars"], done=None))
+            sp = snap["plan"]
+            if sp:                                          # บันทึกคำแนะนำของระบบกติกาไว้เทียบด้วย
+                log.append(dict(t=tnow, key=snap["key"], model="ระบบกติกา (เทียบ)", side=sp["side"], entry=px,
+                                sl=sp["sl"], tp=sp["tp1"], max_bars=snap["max_bars"], done=None))
+            del log[:-400]
+            st.session_state["ai_res"] = dict(bar=snap["bar"], px=px, res=res, labels={k: v["label"] for k, v in plan.items()},
+                                              rule=(snap["plan"]["side"] if snap["plan"] else None),
+                                              rule_status=snap["status"], blocked=snap["blocked"], at=tnow)
+
+    R = st.session_state.get("ai_res")
+    if R:
+        age_note = "" if (snap and R["bar"] == snap["bar"]) else " ⚠️ ความเห็นนี้เก่าแล้ว (คนละแท่งกับตอนนี้) กดขอใหม่"
+        st.caption(f"ขอเมื่อ {R['at'].strftime('%H:%M:%S')} ที่ราคา {R['px']:.2f}{age_note}")
+        rows = []
+        for pid, (v, err) in R["res"].items():
+            if v:
+                rows.append({"AI": R["labels"][pid], "ความเห็น": ACT_TH[v["action"]], "มั่นใจ": v["conf"],
+                             "SL": f"{v['sl']:.2f}" if v["sl"] else "-", "TP": f"{v['tp']:.2f}" if v["tp"] else "-",
+                             "เหตุผล": " · ".join(v["reasons"]) + (f" ({v['note']})" if v["note"] else "")})
+            else:
+                rows.append({"AI": R["labels"][pid], "ความเห็น": "❌ ผิดพลาด", "มั่นใจ": "-", "SL": "-", "TP": "-", "เหตุผล": err})
+        stretch(st.dataframe, pd.DataFrame(rows), hide_index=True, key="tbl-ai")
+        cons = consensus({pid: v for pid, (v, err) in R["res"].items()})
+        if cons:
+            lv = {"all": "เห็นตรงกันทั้งหมด", "most": "ส่วนใหญ่เห็นตรงกัน", "mixed": "เห็นไม่ตรงกัน",
+                  "single": "มี AI ตอบแค่ตัวเดียว"}[cons["level"]]
+            c_ = cons["counts"]
+            line = f"{lv} · BUY {c_['buy']} / SELL {c_['sell']} / รอ {c_['wait']}"
+            rule = R["rule"]
+            if cons["top"] in ("buy", "sell") and cons["level"] in ("all", "most"):
+                if rule == cons["top"]:
+                    st.success(f"{ACT_TH[cons['top']]} · {line} · ตรงกับระบบกติกา (สถานะระบบ: {R['rule_status']}"
+                               f"{', ถูกบล็อกจากเกณฑ์ย้อนหลัง' if R['blocked'] else ''})")
+                elif rule is None:
+                    st.warning(f"{ACT_TH[cons['top']]} · {line} · แต่ระบบกติกาไม่มีสัญญาณ ถือว่าความเห็นไม่ตรงกัน ควรรอ")
+                else:
+                    st.error(f"{ACT_TH[cons['top']]} · {line} · สวนทางกับระบบกติกา ({ACT_TH[rule]}) ไม่ควรเข้า")
+                m = cons["mid"]
+                if m and m["sl"] and m["tp"]:
+                    st.caption(f"ค่ากลางของ AI ฝั่งนี้: SL {m['sl']:.2f} · TP {m['tp']:.2f}"
+                               + (f" · โซนเข้า {m['lo']:.2f}-{m['hi']:.2f}" if m["lo"] and m["hi"] else ""))
+            else:
+                st.info(f"⏸ {line} · ยังไม่ควรเข้าไม้")
+
+    # กระดานคะแนนจริง
+    log = get_ai_log()
+    if snap:
+        for rec in log:
+            if rec["done"] is None and rec["key"] == snap["key"]:
+                out = eval_call(snap["df"], rec["t"], rec["side"], rec["entry"], rec["sl"], rec["tp"], rec["max_bars"])
+                if out:
+                    rec["done"] = out
+    with st.expander("📊 กระดานคะแนนจริงของแต่ละ AI (ตรวจผลคำแนะนำที่ผ่านมา)", expanded=False):
+        stats = {}
+        for rec in log:
+            st_ = stats.setdefault(rec["model"], dict(n=0, w=0, r=0.0, pend=0))
+            if rec["done"] is None:
+                st_["pend"] += 1
+            else:
+                st_["n"] += 1
+                st_["w"] += rec["done"]["result"] == "win"
+                st_["r"] += rec["done"]["r"]
+        if stats:
+            tbl = [{"ผู้แนะนำ": m, "ตรวจผลแล้ว": v["n"], "ชนะ %": f"{100 * v['w'] / v['n']:.0f}" if v["n"] else "-",
+                    "R เฉลี่ย/ไม้": f"{v['r'] / v['n']:+.2f}" if v["n"] else "-", "รอผล": v["pend"]} for m, v in stats.items()]
+            stretch(st.dataframe, pd.DataFrame(tbl), hide_index=True, key="tbl-ai-score")
+        else:
+            st.write("ยังไม่มีข้อมูล กด 'ขอความเห็น AI' เมื่อมีโอกาสเทรด แล้วกลับมาดูหลังครบเวลาถือไม้")
+        st.caption("ตรวจจากราคาหลังขอความเห็น: เข้าที่ราคาตอนขอ ชน SL/TP ที่ AI ให้ก่อนอันไหน หรือปิดตลาดเมื่อครบเวลาถือ "
+                   "(ชนทั้งคู่ในแท่งเดียวนับแพ้) ต้องเปิดหน้าแอปค้างไว้หรือกลับมาเปิดภายหลังเพื่อให้ตรวจผล "
+                   "สถิติรีเซ็ตเมื่อแอปรีสตาร์ท ต้องมีหลายสิบครั้งขึ้นไปถึงจะเชื่อได้ ตัวอย่างน้อยแกว่งมาก")
+
+
+ai_panel()
