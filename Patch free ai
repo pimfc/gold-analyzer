@@ -1,0 +1,100 @@
+"""
+patch_free_ai.py - เพิ่ม "AI ที่ไม่ต้องใช้ API key" ให้ Gold Analyzer v6
+วิธีใช้: วางไฟล์นี้ไว้โฟลเดอร์เดียวกับ app.py แล้วรัน   python patch_free_ai.py
+(สำรองไฟล์เดิมเป็น app.py.bak ให้ก่อน ถ้าจุดไหนหาไม่เจอ จะไม่แก้อะไรเลย)
+"""
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1] if len(sys.argv) > 1 else "app.py")
+src = path.read_text(encoding="utf-8")
+if "nokey" in src:
+    sys.exit("ไฟล์นี้ถูกแพตช์แล้ว ไม่ต้องทำซ้ำ")
+
+EDITS = []
+
+# 1) _http: รับ timeout + ไม่พังเมื่อ key ว่าง (replace("", ...) จะทำข้อความเพี้ยน)
+EDITS.append(('''def _http(url, headers, payload, key):
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200].replace(key, '***')}")
+    return r.json()
+''', '''def _http(url, headers, payload, key, timeout=90):
+    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    if not r.ok:
+        body = r.text[:200]
+        raise RuntimeError(f"HTTP {r.status_code}: {body.replace(key, '***') if key else body}")
+    return r.json()
+'''))
+
+# 2) call_ai: เพิ่มผู้ให้บริการที่ไม่ต้องใช้ key
+EDITS.append(('''    raise ValueError("ไม่รู้จักผู้ให้บริการ")''', '''    if provider == "ollama":            # AI ในเครื่องคุณเอง ไม่ต้องใช้ key
+        try:
+            j = _http("http://localhost:11434/api/chat", {"Content-Type": "application/json"},
+                      {"model": model, "stream": False, "format": "json", "options": {"temperature": 0.2},
+                       "messages": [{"role": "system", "content": AI_SYS}, {"role": "user", "content": user_text}]},
+                      "", timeout=240)
+        except requests.exceptions.ConnectionError:
+            raise RuntimeError("เชื่อม Ollama ไม่ได้ ติดตั้งจาก ollama.com แล้วเปิดโปรแกรมค้างไว้ "
+                               f"และสั่ง ollama pull {model} (ใช้ได้เมื่อแอปรันบนเครื่องเดียวกับ Ollama เท่านั้น)")
+        return (j.get("message") or {}).get("content", "")
+    if provider == "pollinations":      # บริการฟรีบนคลาวด์ ไม่ต้องสมัคร (ไม่รับประกันว่าใช้ได้ตลอด)
+        j = _http("https://text.pollinations.ai/openai", {"Content-Type": "application/json"},
+                  {"model": model or "openai",
+                   "messages": [{"role": "system", "content": AI_SYS}, {"role": "user", "content": user_text}]},
+                  "", timeout=120)
+        return j["choices"][0]["message"]["content"] or ""
+    raise ValueError("ไม่รู้จักผู้ให้บริการ")'''))
+
+# 3) แถบข้าง: ตัวเลือก AI ที่ไม่ต้องใช้ key (ต่อท้ายลูปเดิม อยู่ใน expander เดียวกัน)
+EDITS.append(('''        AI_CFG[pid] = dict(on=on, typed=typed.strip(), model=model.strip(), secname=secname, label=label)
+''', '''        AI_CFG[pid] = dict(on=on, typed=typed.strip(), model=model.strip(), secname=secname, label=label)
+    st.markdown("**ไม่ต้องมี API key**")
+    st.caption("Pollinations = บริการฟรีบนคลาวด์ ไม่ต้องสมัคร แต่ไม่รับประกันว่าใช้ได้ตลอด "
+               "Ollama = รัน AI บนเครื่องคุณเอง (ติดตั้งจาก ollama.com แล้วสั่ง ollama pull qwen2.5:7b) "
+               "ใช้ได้เมื่อแอปรันบนเครื่องเดียวกันเท่านั้น AI ฟรีขนาดเล็กวิเคราะห์ได้หยาบกว่า Claude/GPT/Gemini "
+               "ดูกระดานคะแนนจริงก่อนเชื่อ")
+    for pid, label, dmodel, don in (("pollinations", "AI ฟรีบนคลาวด์ (Pollinations)", "openai", True),
+                                    ("ollama", "AI ในเครื่อง (Ollama)", "qwen2.5:7b", False)):
+        on = st.checkbox(f"ใช้ {label}", value=don, key=f"ai_on_{pid}")
+        model = st.text_input("ชื่อโมเดล", value=dmodel, key=f"ai_model_{pid}")
+        AI_CFG[pid] = dict(on=on, typed="", model=model.strip(), secname=None, label=label, nokey=True)
+'''))
+
+# 4) ai_panel: ผู้ให้บริการที่ไม่ใช้ key ข้ามการหา key / รหัสผ่าน
+EDITS.append(('''        sec = _secret(c["secname"])
+        key, src = (c["typed"], "typed") if c["typed"] else ((sec, "secret") if sec else ("", None))
+        plan[pid] = dict(c, key=key, src=src)
+''', '''        if c.get("nokey"):
+            plan[pid] = dict(c, key="", src="free")
+            continue
+        sec = _secret(c["secname"])
+        key, src = (c["typed"], "typed") if c["typed"] else ((sec, "secret") if sec else ("", None))
+        plan[pid] = dict(c, key=key, src=src)
+'''))
+
+# 5) ไม่นับตัวที่ไม่ต้องใช้ key ว่า "ขาด key"
+EDITS.append(('''    missing = [c["label"] for c in plan.values() if not c["key"]]''',
+              '''    missing = [c["label"] for c in plan.values() if not c["key"] and c["src"] != "free"]'''))
+
+# 6) ข้อความ error: อย่า replace("") เมื่อไม่มี key
+EDITS.append(('''                    return pid, None, f"{type(e).__name__}: {str(e)[:220]}".replace(c["key"], "***")''',
+              '''                    msg_ = f"{type(e).__name__}: {str(e)[:220]}"
+                    return pid, None, (msg_.replace(c["key"], "***") if c["key"] else msg_)'''))
+
+# 7) ข้อความแนะนำเมื่อยังไม่เปิด AI
+EDITS.append(('''        st.info("เปิดใช้ AI อย่างน้อย 1 ตัวที่แถบซ้าย หัวข้อ '🤖 AI หลายตัวช่วยวิเคราะห์' และใส่ API key")''',
+              '''        st.info("เปิดใช้ AI อย่างน้อย 1 ตัวที่แถบซ้าย หัวข้อ '🤖 AI หลายตัวช่วยวิเคราะห์' "
+                "(ตัวที่อยู่ใต้ 'ไม่ต้องมี API key' ใช้ได้เลยโดยไม่ต้องใส่ key)")'''))
+
+out = src.replace("\r\n", "\n")
+for n, (old, new) in enumerate(EDITS, 1):
+    if out.count(old) != 1:
+        sys.exit(f"แพตช์จุดที่ {n} ไม่สำเร็จ: หาข้อความเดิมเจอ {out.count(old)} ที่ (ต้องเจอ 1) "
+                 "ไฟล์ app.py ของคุณอาจต่างจากเวอร์ชัน v6 ที่ส่งมา ยังไม่ได้แก้อะไร")
+    out = out.replace(old, new)
+
+path.with_name(path.name + ".bak").write_text(src, encoding="utf-8")
+with open(path, "w", encoding="utf-8", newline="\n") as f:
+    f.write(out)
+print("แพตช์สำเร็จ ✅ (สำรองไฟล์เดิมไว้ที่ app.py.bak) รัน: streamlit run app.py")
